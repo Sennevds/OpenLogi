@@ -16,6 +16,7 @@ use crate::backend::HidBackend;
 use crate::channel::route::{DeviceRoute, open_route_channel};
 
 mod backlight;
+mod crown;
 mod diagnostics;
 mod dpi;
 mod error;
@@ -27,6 +28,7 @@ mod litra;
 mod smartshift;
 
 pub use backlight::{get_backlight, set_backlight_enabled};
+pub use crown::{CrownState, get_crown_state};
 pub use diagnostics::{
     FeatureEntry, FirmwareEntity, FirmwareEntityInfo, ReprogControlEntry, dump_features,
     dump_firmware_entities, dump_reprog_controls, read_battery_raw,

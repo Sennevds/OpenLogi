@@ -24,8 +24,8 @@ use openlogi_device::backlight::BacklightState;
 use openlogi_device::inventory::{Enumerator, InventoryError};
 use openlogi_device::pairing::PairingReceiver;
 use openlogi_device::write::{
-    self as device, Dpi, DpiInfo, FeatureEntry, FirmwareEntity, HapticWaveform, LightingMethod,
-    LitraModel, ReprogControlEntry, ScrollResolution, ScrollWheelMode,
+    self as device, CrownState, Dpi, DpiInfo, FeatureEntry, FirmwareEntity, HapticWaveform,
+    LightingMethod, LitraModel, ReprogControlEntry, ScrollResolution, ScrollWheelMode,
 };
 
 /// This host's HID stack.
@@ -181,6 +181,11 @@ pub async fn dump_reprog_controls(
 /// Read the raw battery report of the device `route` reaches.
 pub async fn read_battery_raw(route: &DeviceRoute) -> Result<String, WriteError> {
     device::read_battery_raw(&*native_backend(), route).await
+}
+
+/// Read the crown state of the device `route` reaches.
+pub async fn get_crown_state(route: &DeviceRoute) -> Result<CrownState, WriteError> {
+    device::get_crown_state(&*native_backend(), route).await
 }
 
 /// An enumerator over this host's HID stack, with a memory-only probe cache.
