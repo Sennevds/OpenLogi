@@ -15,7 +15,7 @@ use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, RwLock};
 
 use openlogi_core::app::ForegroundApp;
-use openlogi_core::binding::{Action, Binding};
+use openlogi_core::binding::{Action, Binding, ButtonId};
 use openlogi_core::bindings::{button_bindings_for, oshook_gestures_for};
 use openlogi_core::config::{Config, LightSettings, ScrollResolution};
 use openlogi_core::device::{
@@ -24,7 +24,7 @@ use openlogi_core::device::{
 use openlogi_core::device_order::{DeviceIdentity, DeviceStableId};
 use openlogi_hid::{
     CaptureChannel, ChannelPool, ChannelRegistry, DIRECT_DEVICE_INDEX, DeviceRoute,
-    KEYBOARD_KEY_CIDS,
+    KEYBOARD_KEY_CIDS, KeyboardCaptureTargets,
 };
 use openlogi_ipc::InventoryHealth;
 use tracing::{debug, info, warn};
@@ -283,23 +283,29 @@ impl Orchestrator {
             Some(&dev.config_key),
             self.current_app.as_deref(),
         );
-        let wanted: BTreeMap<u16, _> = KEYBOARD_KEY_CIDS
-            .iter()
-            .filter(|(_, button)| {
-                bindings.get(button).is_some_and(|binding| {
-                    matches!(binding, Binding::LongPress(_))
-                        || binding.click_action() != Action::None
-                })
+        let is_bound = |button: &ButtonId| {
+            bindings.get(button).is_some_and(|binding| {
+                matches!(binding, Binding::LongPress(_)) || binding.click_action() != Action::None
             })
+        };
+        let keys: BTreeMap<u16, _> = KEYBOARD_KEY_CIDS
+            .iter()
+            .filter(|(_, button)| is_bound(button))
             .copied()
             .collect();
-        if wanted.is_empty() {
+        // Diverting the crown takes over its native volume function, so it is
+        // armed only for a keyboard that actually has one and only while one
+        // of its controls carries a real binding — the same rule as a key.
+        let crown = dev.capabilities.is_some_and(|caps| caps.crown)
+            && ButtonId::CROWN_CONTROLS.iter().any(is_bound);
+        let targets = KeyboardCaptureTargets { keys, crown };
+        if targets.is_empty() {
             return None;
         }
         Some(KeyboardSpec {
             config_key: dev.config_key.clone(),
             route: dev.route.clone()?,
-            wanted,
+            targets,
             bindings,
         })
     }

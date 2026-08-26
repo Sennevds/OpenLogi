@@ -831,6 +831,7 @@ mod tests {
             thumbwheel: false,
             haptic_feedback: false,
             haptic_panel: false,
+            crown: false,
         });
         // After 0x0005 kind-correction the record has kind=Mouse, not Keyboard.
         let tabs = DetailTab::tabs_for(&record(DeviceKind::Mouse, caps));
@@ -853,6 +854,7 @@ mod tests {
             thumbwheel: false,
             haptic_feedback: false,
             haptic_panel: false,
+            crown: false,
         });
         let tabs = DetailTab::tabs_for(&record(DeviceKind::Keyboard, caps));
         assert!(
@@ -873,6 +875,7 @@ mod tests {
             thumbwheel: false,
             haptic_feedback: false,
             haptic_panel: false,
+            crown: false,
         });
         let tabs = DetailTab::tabs_for(&record(DeviceKind::Keyboard, caps));
         assert!(tabs.contains(&DetailTab::Keys));

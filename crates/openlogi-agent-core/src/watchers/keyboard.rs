@@ -18,7 +18,7 @@ use std::time::Duration;
 
 use openlogi_core::binding::{Binding, ButtonId};
 use openlogi_hid::{
-    CaptureChannel, CapturedInput, ChannelRegistry, DeviceRoute,
+    CaptureChannel, CapturedInput, ChannelRegistry, DeviceRoute, KeyboardCaptureTargets,
     run_keyboard_capture_session_with_registry,
 };
 use tokio::sync::{mpsc, oneshot};
@@ -28,8 +28,8 @@ use crate::receiver_access::ReceiverAccess;
 use crate::runtime::{ActionDispatcher, HidppSessionId};
 
 /// Everything the watcher needs to capture one keyboard: where it is, which
-/// `0x1b04` controls to divert (only keys carrying a real binding), and the
-/// per-key action map presses dispatch through. Rebuilt by the orchestrator on
+/// controls to divert (only those carrying a real binding), and the per-key
+/// action map presses dispatch through. Rebuilt by the orchestrator on
 /// config / inventory / foreground-app changes.
 #[derive(Clone)]
 pub struct KeyboardSpec {
@@ -38,8 +38,8 @@ pub struct KeyboardSpec {
     pub config_key: String,
     /// HID++ route of the keyboard.
     pub route: DeviceRoute,
-    /// `0x1b04` control ID → button, for exactly the bound keys.
-    pub wanted: BTreeMap<u16, ButtonId>,
+    /// The F-row controls and the crown to divert, for exactly the bound ones.
+    pub targets: KeyboardCaptureTargets,
     /// Effective per-key immediate or threshold map (per-app overlay applied).
     pub bindings: BTreeMap<ButtonId, Binding>,
 }
@@ -49,12 +49,12 @@ pub struct KeyboardSpec {
 pub type SharedKeyboardSpec = Arc<RwLock<Option<KeyboardSpec>>>;
 
 /// Capture identity excluding bindings, which may change without requiring a
-/// hardware session restart when the diverted key set stays the same.
+/// hardware session restart when the diverted control set stays the same.
 #[derive(Clone, PartialEq)]
 struct KeyboardTarget {
     config_key: String,
     route: DeviceRoute,
-    wanted: BTreeMap<u16, ButtonId>,
+    targets: KeyboardCaptureTargets,
 }
 
 impl KeyboardTarget {
@@ -62,12 +62,14 @@ impl KeyboardTarget {
         Self {
             config_key: spec.config_key,
             route: spec.route,
-            wanted: spec.wanted,
+            targets: spec.targets,
         }
     }
 
     fn matches(&self, spec: &KeyboardSpec) -> bool {
-        self.config_key == spec.config_key && self.route == spec.route && self.wanted == spec.wanted
+        self.config_key == spec.config_key
+            && self.route == spec.route
+            && self.targets == spec.targets
     }
 }
 
@@ -239,12 +241,12 @@ async fn manage(
                     let done = done_tx.clone();
                     let done_id = id.clone();
                     let route = target.route.clone();
-                    let wanted = target.wanted.clone();
+                    let targets = target.targets.clone();
                     tokio::spawn(async move {
                         let _receiver_lease = receiver_lease;
                         if let Err(e) = run_keyboard_capture_session_with_registry(
                             route,
-                            wanted,
+                            targets,
                             sink,
                             stop_rx,
                             slot,

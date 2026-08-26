@@ -554,6 +554,7 @@ fn an_incomplete_capability_walk_keeps_the_last_complete_answer() {
     let mut cached = probed(None, false);
     cached.capabilities = Some(Capabilities {
         haptic_panel: true,
+        crown: false,
         ..Capabilities::default()
     });
 
@@ -574,6 +575,7 @@ fn a_complete_capability_walk_is_left_alone() {
     let mut cached = probed(None, false);
     cached.capabilities = Some(Capabilities {
         haptic_panel: true,
+        crown: false,
         ..Capabilities::default()
     });
 

@@ -66,9 +66,12 @@ pub fn default_binding(button: ButtonId) -> Action {
         ButtonId::ThumbwheelScrollDown => Action::HorizontalScrollLeft,
         ButtonId::GestureButton => Action::MissionControl,
         ButtonId::HapticPanel => Action::ShowActionsRing,
-        // Keyboard keys stay on their native firmware function until the user
-        // explicitly binds them; an unbound key is never diverted, so a
-        // `None` default keeps the projection total without capturing anything.
+        // Keyboard keys — and the Craft crown's controls — stay on their
+        // native firmware function until the user explicitly binds them; an
+        // unbound control is never diverted, so a `None` default keeps the
+        // projection total without capturing anything. (The crown's native
+        // function is volume; diverting it steals that, so the divert is
+        // gated on a real binding exactly like the F-row.)
         ButtonId::KeySearch
         | ButtonId::KeyDictation
         | ButtonId::KeyEmoji
@@ -77,7 +80,11 @@ pub fn default_binding(button: ButtonId) -> Action {
         | ButtonId::KeyPlayPause
         | ButtonId::KeyMute
         | ButtonId::KeyVolumeDown
-        | ButtonId::KeyVolumeUp => Action::None,
+        | ButtonId::KeyVolumeUp
+        | ButtonId::CrownRotateUp
+        | ButtonId::CrownRotateDown
+        | ButtonId::CrownPress
+        | ButtonId::CrownTap => Action::None,
     }
 }
 

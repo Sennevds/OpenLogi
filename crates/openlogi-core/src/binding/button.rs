@@ -73,10 +73,26 @@ pub enum ButtonId {
     /// Tilting the main wheel right — `0x1b04` CID `0x005d` ("Right Scroll"),
     /// Logi metadata slot `SLOT_NAME_RIGHT_SCROLL_BUTTON`. Counterpart to
     /// [`ButtonId::WheelTiltLeft`].
+    WheelTiltRight,
+    /// The Craft keyboard's crown dial rotating clockwise. Crown controls are
+    /// captured over the crown's own HID++ feature (`0x4600`), not `0x1b04`,
+    /// by the keyboard capture session — and only while one of them carries a
+    /// real binding, so an untouched crown keeps its native firmware function
+    /// (volume). Like the F-row keys they stay out of [`ButtonId::ALL`],
+    /// which seeds mouse defaults and the mouse popover trigger list.
+    CrownRotateUp,
+    /// The crown rotating counter-clockwise. See [`ButtonId::CrownRotateUp`].
+    CrownRotateDown,
+    /// The crown's physical button press. Dispatched with down/up edges, so
+    /// it supports long-press bindings like any diverted button.
+    CrownPress,
+    /// A touch tap on the crown's surface (no press). Like
+    /// [`ButtonId::Thumbwheel`], the firmware reports taps from incidental
+    /// finger contact while turning, so its default binding is inert.
     ///
     /// Declared last: the TOML config and any serialized form encode the
     /// variant identifier / index, so new buttons are append-only.
-    WheelTiltRight,
+    CrownTap,
 }
 
 impl ButtonId {
@@ -113,6 +129,17 @@ impl ButtonId {
         ButtonId::KeyMute,
         ButtonId::KeyVolumeDown,
         ButtonId::KeyVolumeUp,
+    ];
+
+    /// The Craft crown's capturable controls. Kept out of [`ButtonId::ALL`]
+    /// (mouse defaults / popover) and [`ButtonId::KEYBOARD_KEYS`] (`0x1b04`
+    /// F-row controls): the crown is diverted through its own `0x4600`
+    /// feature, and only when one of these carries a real binding.
+    pub const CROWN_CONTROLS: [ButtonId; 4] = [
+        ButtonId::CrownRotateUp,
+        ButtonId::CrownRotateDown,
+        ButtonId::CrownPress,
+        ButtonId::CrownTap,
     ];
 
     /// Whether this button is one the OS hook (macOS `CGEventTap` / Linux evdev)
@@ -166,6 +193,10 @@ impl ButtonId {
             ButtonId::KeyVolumeDown => "Volume Down Key",
             ButtonId::KeyVolumeUp => "Volume Up Key",
             ButtonId::HapticPanel => "Haptic Panel",
+            ButtonId::CrownRotateUp => "Crown Up",
+            ButtonId::CrownRotateDown => "Crown Down",
+            ButtonId::CrownPress => "Crown Press",
+            ButtonId::CrownTap => "Crown Tap",
         }
     }
 }

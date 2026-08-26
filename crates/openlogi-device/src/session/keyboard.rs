@@ -1,6 +1,6 @@
 //! Live key capture for one keyboard: divert the bound F-row controls over
-//! HID++ `0x1b04` and turn their physical edges into [`CapturedInput`] the agent can
-//! dispatch.
+//! HID++ `0x1b04` — and, on a Craft, the crown dial over `0x4600` — and turn
+//! their physical edges into [`CapturedInput`] the agent can dispatch.
 //!
 //! [`run_keyboard_capture_session`] is the keyboard counterpart of
 //! [`crate::session::gesture::run_capture_session`]: one open channel, diversion armed
@@ -12,6 +12,11 @@
 //! function — so it fires when Fn-lock is off (or via Fn+key when it is on).
 //! The plain F1–F12 codes of an Fn-locked row travel the ordinary HID keyboard
 //! interface and never reach `0x1b04`.
+//!
+//! The crown rides along in this session rather than one of its own: a second
+//! channel to the same keyboard would split its input-report stream. Both
+//! diversions are gated the same way — an unbound control is never diverted,
+//! so it keeps its native firmware function (volume, for the crown).
 
 use std::collections::{BTreeMap, BTreeSet};
 use std::sync::{Arc, Mutex, PoisonError};
@@ -20,6 +25,7 @@ use hidpp::{
     device::Device,
     feature::{
         CreatableFeature, EmittingFeature,
+        crown::CrownEvent,
         wireless_device_status::{WirelessDeviceStatusEvent, WirelessDeviceStatusFeature},
     },
     protocol::v20,
@@ -28,6 +34,7 @@ use openlogi_core::binding::ButtonId;
 use tokio::sync::{mpsc, oneshot};
 use tracing::{debug, info, warn};
 
+use super::crown::CrownCapture;
 use super::gesture::{CaptureChannel, CapturedInput, GestureError, enumerate_controls, restore};
 use crate::ChannelRegistry;
 use crate::SharedChannel;
@@ -52,18 +59,47 @@ pub const KEYBOARD_KEY_CIDS: [(u16, ButtonId); 9] = [
     (0x00e9, ButtonId::KeyVolumeUp),
 ];
 
+/// An event one capture session waits on, from either of its two optional
+/// sources, so the wait stays a single `select!`.
+enum SessionEvent {
+    /// The keyboard announced a reconnect — diversion must be re-armed.
+    Wake(WirelessDeviceStatusEvent),
+    /// The crown reported rotation, touch or button state.
+    Crown(CrownEvent),
+}
+
+/// What one keyboard capture session should divert.
+///
+/// Both halves are gated on real bindings by the caller: an unbound control is
+/// never diverted, so it keeps its native firmware function.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct KeyboardCaptureTargets {
+    /// `0x1b04` control ID → button, for exactly the bound F-row keys.
+    pub keys: BTreeMap<u16, ButtonId>,
+    /// Whether to divert the crown dial (`0x4600`). Ignored by a keyboard
+    /// that exposes no crown.
+    pub crown: bool,
+}
+
+impl KeyboardCaptureTargets {
+    /// Whether this session would divert anything at all.
+    #[must_use]
+    pub fn is_empty(&self) -> bool {
+        self.keys.is_empty() && !self.crown
+    }
+}
+
 /// Capture the requested keyboard controls on `route` until `shutdown`
 /// resolves, forwarding [`CapturedInput::ButtonDown`] and
 /// [`CapturedInput::ButtonUp`] edges to `sink`.
 ///
-/// `wanted` maps `0x1b04` control IDs to the [`ButtonId`] they dispatch as —
-/// the caller passes only the keys that carry a real binding. Controls the
-/// device doesn't expose (or can't divert) are skipped with a debug log, so a
-/// partially-supported keyboard degrades per key rather than failing whole.
+/// Controls the device doesn't expose (or can't divert) are skipped with a
+/// debug log, so a partially-supported keyboard degrades per control rather
+/// than failing whole.
 pub async fn run_keyboard_capture_session(
     backend: &dyn HidBackend,
     route: DeviceRoute,
-    wanted: BTreeMap<u16, ButtonId>,
+    targets: KeyboardCaptureTargets,
     sink: mpsc::UnboundedSender<CapturedInput>,
     shutdown: oneshot::Receiver<()>,
     channel_slot: CaptureChannel,
@@ -72,7 +108,7 @@ pub async fn run_keyboard_capture_session(
         .await?
         .ok_or(GestureError::DeviceNotFound)?;
     let shared = SharedChannel::new(chan, route.clone());
-    run_keyboard_capture_session_on(route, shared, wanted, sink, shutdown, channel_slot).await
+    run_keyboard_capture_session_on(route, shared, targets, sink, shutdown, channel_slot).await
 }
 
 /// Run keyboard capture on the exact channel currently published by `registry`.
@@ -82,7 +118,7 @@ pub async fn run_keyboard_capture_session(
 /// inventory publication.
 pub async fn run_keyboard_capture_session_with_registry(
     route: DeviceRoute,
-    wanted: BTreeMap<u16, ButtonId>,
+    targets: KeyboardCaptureTargets,
     sink: mpsc::UnboundedSender<CapturedInput>,
     shutdown: oneshot::Receiver<()>,
     channel_slot: CaptureChannel,
@@ -91,13 +127,13 @@ pub async fn run_keyboard_capture_session_with_registry(
     let shared = registry
         .lookup(&route)
         .ok_or(GestureError::DeviceNotFound)?;
-    run_keyboard_capture_session_on(route, shared, wanted, sink, shutdown, channel_slot).await
+    run_keyboard_capture_session_on(route, shared, targets, sink, shutdown, channel_slot).await
 }
 
 async fn run_keyboard_capture_session_on(
     route: DeviceRoute,
     shared: SharedChannel,
-    wanted: BTreeMap<u16, ButtonId>,
+    targets: KeyboardCaptureTargets,
     sink: mpsc::UnboundedSender<CapturedInput>,
     shutdown: oneshot::Receiver<()>,
     channel_slot: CaptureChannel,
@@ -108,41 +144,41 @@ async fn run_keyboard_capture_session_on(
         .await
         .map_err(|_| GestureError::DeviceUnreachable(device_index))?;
 
-    let info = device
-        .root()
-        .get_feature(reprog_controls::FEATURE_ID)
-        .await
-        .map_err(|e| GestureError::Hidpp(format!("{e:?}")))?
-        .ok_or_else(|| GestureError::Hidpp("keyboard exposes no 0x1b04 reprog controls".into()))?;
-    let rc = ReprogControlsV4::new(Arc::clone(&chan), device_index, info.index);
-    let controls = enumerate_controls(&rc).await?;
+    let keys = arm_reprog_keys(&device, &chan, device_index, &targets.keys).await?;
 
-    let diverted = arm_keys(&rc, &controls, &wanted).await?;
-
-    // Physical press state per CID. Behind a `Mutex` because the channel's
-    // read thread invokes the listener by shared reference.
-    let held: Arc<Mutex<BTreeSet<u16>>> = Arc::new(Mutex::new(BTreeSet::new()));
-    let feature_index = info.index;
-    let listener = chan.add_msg_listener_guarded({
-        let held = Arc::clone(&held);
-        let diverted = diverted.clone();
-        let sink = sink.clone();
-        move |raw, matched| {
-            if matched {
-                return;
+    let listener = keys.as_ref().map(|keys| {
+        // Physical press state per CID. Behind a `Mutex` because the channel's
+        // read thread invokes the listener by shared reference.
+        let held: Arc<Mutex<BTreeSet<u16>>> = Arc::new(Mutex::new(BTreeSet::new()));
+        let feature_index = keys.feature_index;
+        chan.add_msg_listener_guarded({
+            let diverted = keys.diverted.clone();
+            let sink = sink.clone();
+            move |raw, matched| {
+                if matched {
+                    return;
+                }
+                let msg = v20::Message::from(raw);
+                let Some(RawControlEvent::DivertedButtons(cids)) =
+                    reprog_controls::decode_event(&msg, device_index, feature_index)
+                else {
+                    return;
+                };
+                // Recover the guard even if a prior holder panicked — the
+                // critical section is panic-free, so the data is consistent.
+                let mut down = held.lock().unwrap_or_else(PoisonError::into_inner);
+                emit_button_edges(&mut down, &cids, &diverted, &sink);
             }
-            let msg = v20::Message::from(raw);
-            let Some(RawControlEvent::DivertedButtons(cids)) =
-                reprog_controls::decode_event(&msg, device_index, feature_index)
-            else {
-                return;
-            };
-            // Recover the guard even if a prior holder panicked — the critical
-            // section is panic-free, so the data is consistent.
-            let mut down = held.lock().unwrap_or_else(PoisonError::into_inner);
-            emit_button_edges(&mut down, &cids, &diverted, &sink);
-        }
+        })
     });
+
+    // The crown's own feature carries its divert switch and its events, so it
+    // needs no message listener here — `CrownCapture` subscribes typed.
+    let crown = if targets.crown {
+        CrownCapture::arm(&device, &chan, device_index).await?
+    } else {
+        None
+    };
 
     // Wireless keyboards drop their diverted-control state when they
     // power-cycle (idle sleep, power switch, Easy-Switch host change) — the
@@ -167,44 +203,141 @@ async fn run_keyboard_capture_session_on(
 
     info!(
         index = device_index,
-        keys = diverted.len(),
+        keys = keys.as_ref().map_or(0, |k| k.diverted.len()),
+        crown = crown.is_some(),
         wake_rearm = wake_events.is_some(),
         "keyboard key capture active"
     );
-    let mut shutdown = shutdown;
-    match wake_events {
-        None => {
-            let _ = shutdown.await;
-        }
-        Some(wake_events) => loop {
-            tokio::select! {
-                _ = &mut shutdown => break,
-                event = wake_events.recv() => {
-                    let Ok(WirelessDeviceStatusEvent::StatusBroadcast(broadcast)) = event else {
-                        // Emitter gone (feature dropped) — nothing left to
-                        // watch; fall back to a plain shutdown wait.
-                        let _ = shutdown.await;
-                        break;
-                    };
-                    info!(?broadcast, "keyboard reconnected — re-arming key diversion");
-                    rearm_keys(&rc, &diverted).await;
+
+    // Both event sources are optional and either can end early (the emitter is
+    // dropped with its feature). Forwarding them into one channel keeps the
+    // wait in `serve` a single `select!`: a finished source just drops its
+    // sender instead of leaving a branch that resolves instantly forever.
+    let (events_tx, events) = mpsc::unbounded_channel::<SessionEvent>();
+    if let Some(wake_events) = wake_events {
+        let tx = events_tx.clone();
+        tokio::spawn(async move {
+            while let Ok(event) = wake_events.recv().await {
+                if tx.send(SessionEvent::Wake(event)).is_err() {
+                    break;
                 }
             }
-        },
+        });
     }
+    if let Some(crown) = crown.as_ref() {
+        crown.forward_events(events_tx.clone(), SessionEvent::Crown);
+    }
+    // Held by the forwarders only, so `events.recv()` resolves to `None` once
+    // every source is gone rather than blocking forever.
+    drop(events_tx);
+
+    serve(keys.as_ref(), crown.as_ref(), events, &sink, shutdown).await;
 
     drop(listener);
     if let Ok(mut slot) = channel_slot.write() {
         *slot = None;
     }
-    for &cid in diverted.keys() {
-        restore(
-            rc.set_cid_reporting(cid, false, false).await,
-            "keyboard key",
-        );
+    if let Some(keys) = keys.as_ref() {
+        for &cid in keys.diverted.keys() {
+            restore(
+                keys.rc.set_cid_reporting(cid, false, false).await,
+                "keyboard key",
+            );
+        }
+    }
+    if let Some(crown) = crown.as_ref() {
+        crown.restore().await;
     }
     debug!(index = device_index, "keyboard key capture stopped");
     Ok(())
+}
+
+/// The `0x1b04` half of a session: the armed controls and the feature handle
+/// needed to decode their events and hand them back on shutdown.
+struct DivertedKeys {
+    rc: ReprogControlsV4,
+    feature_index: u8,
+    diverted: BTreeMap<u16, ButtonId>,
+}
+
+/// Divert the bound F-row controls, or `Ok(None)` when none are bound.
+///
+/// The crown does not need `0x1b04`, so a session diverting only the crown
+/// must not fail on a keyboard that exposes no reprog controls — hence the
+/// whole half being skipped rather than probed and tolerated.
+async fn arm_reprog_keys(
+    device: &Device,
+    chan: &Arc<hidpp::channel::HidppChannel>,
+    device_index: u8,
+    wanted: &BTreeMap<u16, ButtonId>,
+) -> Result<Option<DivertedKeys>, GestureError> {
+    if wanted.is_empty() {
+        return Ok(None);
+    }
+    let info = device
+        .root()
+        .get_feature(reprog_controls::FEATURE_ID)
+        .await
+        .map_err(|e| GestureError::Hidpp(format!("{e:?}")))?
+        .ok_or_else(|| GestureError::Hidpp("keyboard exposes no 0x1b04 reprog controls".into()))?;
+    let rc = ReprogControlsV4::new(Arc::clone(chan), device_index, info.index);
+    let controls = enumerate_controls(&rc).await?;
+    let diverted = arm_keys(&rc, &controls, wanted).await?;
+    Ok(Some(DivertedKeys {
+        rc,
+        feature_index: info.index,
+        diverted,
+    }))
+}
+
+/// Serve the session until `shutdown` resolves: re-arm diversion on every
+/// reconnect broadcast, and forward translated crown inputs to `sink`.
+async fn serve(
+    keys: Option<&DivertedKeys>,
+    crown: Option<&CrownCapture>,
+    events: mpsc::UnboundedReceiver<SessionEvent>,
+    sink: &mpsc::UnboundedSender<CapturedInput>,
+    shutdown: oneshot::Receiver<()>,
+) {
+    let mut events = events;
+    let mut translator = crown.map(CrownCapture::translator);
+    let mut shutdown = shutdown;
+    loop {
+        tokio::select! {
+            _ = &mut shutdown => break,
+            event = events.recv() => {
+                match event {
+                    Some(SessionEvent::Wake(event)) => {
+                        let WirelessDeviceStatusEvent::StatusBroadcast(broadcast) = event else {
+                            continue;
+                        };
+                        info!(?broadcast, "keyboard reconnected — re-arming diversion");
+                        if let Some(keys) = keys {
+                            rearm_keys(&keys.rc, &keys.diverted).await;
+                        }
+                        if let Some(crown) = crown {
+                            crown.rearm().await;
+                        }
+                    }
+                    Some(SessionEvent::Crown(event)) => {
+                        let CrownEvent::Update(update) = event else {
+                            continue;
+                        };
+                        if let Some(translator) = translator.as_mut() {
+                            for input in translator.update(&update) {
+                                let _ = sink.send(input);
+                            }
+                        }
+                    }
+                    // Every source ended; only shutdown remains.
+                    None => {
+                        let _ = (&mut shutdown).await;
+                        break;
+                    }
+                }
+            }
+        }
+    }
 }
 
 /// Diff one full diverted-control snapshot into exactly one edge per physical

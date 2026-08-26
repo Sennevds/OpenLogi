@@ -66,6 +66,14 @@ Common device fields are:
   `Thumbwheel` is the thumb wheel's capacitive tap — it has no GUI control and
   stays inert unless bound here, because the wheel reports taps from incidental
   thumb contact as well as from deliberate ones
+  `CrownRotateUp`, `CrownRotateDown`, `CrownPress`, and `CrownTap` are the
+  Craft keyboard's crown dial. Like the F-row keys they have no GUI control
+  and stay native until bound here: diverting the crown takes over its
+  firmware volume function, so it is only diverted while one of the four
+  carries a real action. `CrownTap` is a touch tap with no press, reported
+  from incidental finger contact while turning as well as from a deliberate
+  tap. Rotation dispatches one action per detent, capped per report so a fast
+  flick cannot fire an unbounded burst
 - `per_app_bindings`: sparse action overlays keyed by macOS bundle id, Linux
   application id, exact lower-cased Windows executable path, or
   `exe:<filename>.exe`. The Buttons panel edits these under its Profile

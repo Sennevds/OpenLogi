@@ -902,3 +902,127 @@ fn app_switch_republishes_capture_plans() {
     orch.set_current_app(Some(ForegroundApp::unnamed("com.example.editor".into())));
     assert_eq!(published_back_binding(&orch), Some(Action::Undo));
 }
+
+/// A keyboard that reports a crown in its probed feature table.
+fn craft(key: &str) -> AgentDevice {
+    AgentDevice {
+        kind: DeviceKind::Keyboard,
+        capabilities: Some(Capabilities {
+            crown: true,
+            ..Capabilities::default()
+        }),
+        ..dev(key, 2, true)
+    }
+}
+
+#[test]
+fn an_unbound_crown_is_never_diverted() {
+    // Diverting the crown takes over its firmware volume function, so a user
+    // who has bound nothing must keep a working volume dial.
+    let mut orch = orchestrator(Config::default());
+    orch.devices = vec![craft("craft")];
+    assert!(
+        orch.keyboard_spec_for().is_none(),
+        "a keyboard with no bound control needs no capture session at all"
+    );
+}
+
+#[test]
+fn binding_a_crown_control_arms_the_crown_alone() {
+    let mut config = Config::default();
+    config.set_binding("craft", ButtonId::CrownRotateUp, Action::VolumeUp.into());
+    let mut orch = orchestrator(config);
+    orch.devices = vec![craft("craft")];
+
+    let spec = orch
+        .keyboard_spec_for()
+        .expect("a bound crown control must open a capture session");
+    assert!(spec.targets.crown, "the crown must be armed");
+    assert!(
+        spec.targets.keys.is_empty(),
+        "no F-row key is bound, so none may be diverted"
+    );
+}
+
+#[test]
+fn a_keyboard_without_a_crown_never_arms_one() {
+    // The binding is portable across keyboards (it lives under the device
+    // key), so arming must follow the probed feature table, not the config.
+    let mut config = Config::default();
+    config.set_binding("plain", ButtonId::CrownPress, Action::PlayPause.into());
+    let mut orch = orchestrator(config);
+    orch.devices = vec![AgentDevice {
+        kind: DeviceKind::Keyboard,
+        capabilities: Some(Capabilities::default()),
+        ..dev("plain", 2, true)
+    }];
+    assert!(
+        orch.keyboard_spec_for().is_none(),
+        "a keyboard reporting no 0x4600 must not arm a crown"
+    );
+}
+
+#[test]
+fn an_unprobed_keyboard_does_not_guess_a_crown() {
+    // Capabilities are `None` until the keyboard has been probed. Arming on a
+    // guess would divert a dial that may not exist and, on a Craft, would
+    // race the probe that proves it does.
+    let mut config = Config::default();
+    config.set_binding("craft", ButtonId::CrownTap, Action::AppExpose.into());
+    let mut orch = orchestrator(config);
+    orch.devices = vec![AgentDevice {
+        kind: DeviceKind::Keyboard,
+        capabilities: None,
+        ..dev("craft", 2, true)
+    }];
+    assert!(orch.keyboard_spec_for().is_none());
+}
+
+#[test]
+fn a_bound_crown_and_bound_keys_ride_one_session() {
+    // Both diversions must land in the same spec: a second session would open
+    // a second channel to the keyboard and split its input-report stream.
+    let mut config = Config::default();
+    config.set_binding(
+        "craft",
+        ButtonId::CrownRotateDown,
+        Action::VolumeDown.into(),
+    );
+    config.set_binding("craft", ButtonId::KeySearch, Action::MissionControl.into());
+    let mut orch = orchestrator(config);
+    orch.devices = vec![craft("craft")];
+
+    let spec = orch.keyboard_spec_for().expect("both halves are bound");
+    assert!(spec.targets.crown);
+    assert_eq!(
+        spec.targets.keys.values().copied().collect::<Vec<_>>(),
+        vec![ButtonId::KeySearch]
+    );
+}
+
+#[test]
+fn a_per_app_crown_override_can_arm_the_crown_for_that_app_only() {
+    // Crown bindings are per-app like any other, and the divert set is part of
+    // the session identity — so entering the app must arm the dial and leaving
+    // it must hand volume back.
+    let mut config = Config::default();
+    config.set_per_app_binding(
+        "craft",
+        "com.example.editor",
+        ButtonId::CrownRotateUp,
+        Some(Action::NextTab),
+    );
+    let mut orch = orchestrator(config);
+    orch.devices = vec![craft("craft")];
+
+    assert!(
+        orch.keyboard_spec_for().is_none(),
+        "nothing is bound globally, so the dial stays native"
+    );
+    orch.set_current_app(Some(ForegroundApp::unnamed("com.example.editor".into())));
+    assert!(
+        orch.keyboard_spec_for()
+            .is_some_and(|spec| spec.targets.crown),
+        "the overlay arms the crown while that app is in front"
+    );
+}

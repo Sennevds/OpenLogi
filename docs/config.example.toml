@@ -79,6 +79,11 @@ fn_lock = false
 [devices."receiver:aabbccdd:slot:2".bindings]
 KeySearch = "MissionControl"
 KeyScreenCapture = "Sleep"
+# The Craft's crown dial. Bound here it is diverted over HID++ and stops
+# driving volume in firmware, so leaving these unset keeps the dial native.
+CrownRotateUp = "VolumeUp"
+CrownRotateDown = "VolumeDown"
+CrownPress = "PlayPause"
 
 # Since schema 5 a device is keyed by what it *is* — `unit:<hex>` or
 # `serial:<s>` — rather than by the route it was reached on, so its settings

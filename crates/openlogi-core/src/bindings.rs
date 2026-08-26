@@ -193,6 +193,41 @@ mod tests {
     }
 
     #[test]
+    fn every_crown_control_defaults_to_inert() {
+        // The crown's native firmware function is volume. Seeding any of its
+        // controls with an action would divert the dial on a fresh install
+        // (the agent arms it as soon as one carries a binding) and silently
+        // replace that volume control — so all four must start inert.
+        for control in ButtonId::CROWN_CONTROLS {
+            assert_eq!(
+                default_binding(control),
+                Action::None,
+                "{control:?} must not be seeded with an action"
+            );
+        }
+    }
+
+    #[test]
+    fn a_bound_crown_control_leaves_the_others_inert() {
+        let mut cfg = Config::default();
+        cfg.set_binding("craft", ButtonId::CrownRotateUp, Action::VolumeUp.into());
+
+        let projected = bindings_for(&cfg, Some("craft"), None);
+        assert_eq!(
+            projected.get(&ButtonId::CrownRotateUp),
+            Some(&Action::VolumeUp)
+        );
+        // Crown controls are outside `ButtonId::ALL` (which seeds mouse
+        // defaults), so an unbound one is absent rather than present-and-None
+        // — exactly like the F-row keys. Absence is what the agent reads as
+        // "not bound", so arming the dial for rotation leaves the tap inert.
+        assert!(
+            !projected.contains_key(&ButtonId::CrownTap),
+            "capturing rotation must not activate the tap"
+        );
+    }
+
+    #[test]
     fn an_explicitly_bound_tap_survives_the_inert_default() {
         let mut cfg = Config::default();
         cfg.set_binding("2b034", ButtonId::Thumbwheel, Action::AppExpose.into());

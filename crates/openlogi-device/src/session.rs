@@ -5,7 +5,11 @@
 //! native behavior on the way out: [`gesture`] and [`keyboard`] capture
 //! control presses for the agent to dispatch, [`host_switch`] follows a
 //! keyboard's host keys to switch its linked pointing devices.
+//!
+//! The Craft crown (`crown`) has no session of its own: it is armed inside
+//! [`keyboard`]'s, which already holds that keyboard's one channel.
 
+mod crown;
 pub mod gesture;
 pub mod host_switch;
 pub mod keyboard;
