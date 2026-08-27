@@ -25,6 +25,7 @@ use crate::app::menu::file_url;
 use crate::features::action_ring::ActionRingPanel;
 use crate::features::camera::controls::CameraControlsPanel;
 use crate::features::camera::preview::CameraPreview;
+use crate::features::crown::CrownPanel;
 use crate::features::keyboard::function_row::FunctionRowView;
 use crate::features::lighting::device::LightingPanel;
 use crate::features::lighting::standalone::LightPanel;
@@ -87,6 +88,7 @@ pub(super) struct DetailPanels<'a> {
     pub mouse_model: &'a gpui::Entity<MouseModelView>,
     pub action_ring: &'a gpui::Entity<ActionRingPanel>,
     pub keyboard_model: &'a gpui::Entity<FunctionRowView>,
+    pub crown_panel: &'a gpui::Entity<CrownPanel>,
     pub dpi_panel: &'a gpui::Entity<DpiPanel>,
     pub smartshift_panel: &'a gpui::Entity<SmartShiftPanel>,
     pub lighting_panel: &'a gpui::Entity<LightingPanel>,
@@ -116,6 +118,7 @@ pub(super) fn detail_content(
         }
         DetailTab::ActionsRing => action_ring_tab(panels.action_ring).into_any_element(),
         DetailTab::Keys => keys_tab(panels.keyboard_model).into_any_element(),
+        DetailTab::Crown => crown_tab(panels.crown_panel).into_any_element(),
         DetailTab::Pointer => {
             pointer_tab(panels.dpi_panel, panels.smartshift_panel, cx).into_any_element()
         }
@@ -236,6 +239,7 @@ fn detail_tab_icon(tab: DetailTab) -> &'static str {
         DetailTab::Buttons => "action-icons/mouse-pointer-click.svg",
         DetailTab::ActionsRing => "action-icons/layout-grid.svg",
         DetailTab::Keys => "action-icons/keyboard.svg",
+        DetailTab::Crown => "action-icons/rotate-cw.svg",
         DetailTab::Pointer => "action-icons/gauge.svg",
         DetailTab::Lighting | DetailTab::Light => "action-icons/palette.svg",
         DetailTab::Camera => "action-icons/camera.svg",
@@ -276,6 +280,11 @@ fn tab_body(
 /// Keys tab: the function-row remapper for a keyboard.
 fn keys_tab(keyboard_model: &gpui::Entity<FunctionRowView>) -> impl IntoElement {
     tab_body(ContentWidth::DoubleExtraLarge, keyboard_model.clone()).justify_center()
+}
+
+/// Crown tab: the dial's bindable controls beside the action picker.
+fn crown_tab(crown_panel: &gpui::Entity<CrownPanel>) -> impl IntoElement {
+    tab_body(ContentWidth::Large, crown_panel.clone())
 }
 
 fn action_ring_tab(panel: &gpui::Entity<ActionRingPanel>) -> impl IntoElement {

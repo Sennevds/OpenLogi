@@ -17,6 +17,7 @@ use self::menu::{APP_KEY_CONTEXT, CloseWindow, Minimize, NavigateBack, Zoom};
 use crate::features::action_ring::ActionRingPanel;
 use crate::features::camera::controls::CameraControlsPanel;
 use crate::features::camera::preview::CameraPreview;
+use crate::features::crown::CrownPanel;
 use crate::features::keyboard::function_row::FunctionRowView;
 use crate::features::lighting::device::LightingPanel;
 use crate::features::lighting::standalone::LightPanel;
@@ -75,6 +76,8 @@ enum DetailTab {
     ActionsRing,
     /// The keyboard function-row remapper with clickable F-key bubbles.
     Keys,
+    /// The crown dial's four bindable controls (Craft-class keyboards).
+    Crown,
     /// Pointer tuning — DPI and presets.
     Pointer,
     /// RGB lighting — color, brightness, on/off.
@@ -124,6 +127,12 @@ impl DetailTab {
         if matches!(record.kind, DeviceKind::Keyboard) && caps.buttons {
             tabs.push(Self::Keys);
         }
+        // The crown is a list of bindable controls, not a diagram, so it needs
+        // no kind check to stay clear of the mouse silhouette — and gating it
+        // on kind would only cost a misclassified Craft its dial (issue #127).
+        if caps.crown {
+            tabs.push(Self::Crown);
+        }
         if caps.pointer {
             tabs.push(Self::Pointer);
         }
@@ -150,6 +159,7 @@ impl DetailTab {
             Self::Buttons => tr!("Buttons"),
             Self::ActionsRing => tr!("Actions Ring"),
             Self::Keys => tr!("Keys"),
+            Self::Crown => tr!("Crown"),
             Self::Pointer => tr!("Pointer"),
             Self::Lighting | Self::Light => tr!("Lighting"),
             Self::Camera => tr!("Camera"),
@@ -165,6 +175,7 @@ pub struct AppView {
     mouse_model: Entity<MouseModelView>,
     action_ring_panel: Entity<ActionRingPanel>,
     keyboard_model: Entity<FunctionRowView>,
+    crown_panel: Entity<CrownPanel>,
     dpi_panel: Entity<DpiPanel>,
     smartshift_panel: Entity<SmartShiftPanel>,
     lighting_panel: Entity<LightingPanel>,
@@ -227,6 +238,7 @@ impl AppView {
         let mouse_model = cx.new(|cx| MouseModelView::new(window, cx));
         let action_ring_panel = cx.new(ActionRingPanel::new);
         let keyboard_model = cx.new(FunctionRowView::new);
+        let crown_panel = cx.new(CrownPanel::new);
         let dpi_panel = cx.new(DpiPanel::new);
         let smartshift_panel = cx.new(SmartShiftPanel::new);
         let lighting_panel = cx.new(LightingPanel::new);
@@ -287,6 +299,7 @@ impl AppView {
             mouse_model,
             action_ring_panel,
             keyboard_model,
+            crown_panel,
             dpi_panel,
             smartshift_panel,
             lighting_panel,
@@ -600,6 +613,7 @@ impl Render for AppView {
                         mouse_model: &self.mouse_model,
                         action_ring: &self.action_ring_panel,
                         keyboard_model: &self.keyboard_model,
+                        crown_panel: &self.crown_panel,
                         dpi_panel: &self.dpi_panel,
                         smartshift_panel: &self.smartshift_panel,
                         lighting_panel: &self.lighting_panel,
@@ -880,6 +894,52 @@ mod tests {
         let tabs = DetailTab::tabs_for(&record(DeviceKind::Keyboard, caps));
         assert!(tabs.contains(&DetailTab::Keys));
         assert!(!tabs.contains(&DetailTab::Buttons));
+    }
+
+    #[test]
+    fn a_crown_keyboard_shows_the_crown_tab_beside_its_keys() {
+        let caps = Some(Capabilities {
+            buttons: true,
+            crown: true,
+            ..Capabilities::default()
+        });
+        let tabs = DetailTab::tabs_for(&record(DeviceKind::Keyboard, caps));
+        assert!(tabs.contains(&DetailTab::Crown));
+        assert!(tabs.contains(&DetailTab::Keys), "the F-row is unaffected");
+    }
+
+    #[test]
+    fn a_keyboard_without_a_crown_hides_the_tab() {
+        let caps = Some(Capabilities {
+            buttons: true,
+            ..Capabilities::default()
+        });
+        assert!(
+            !DetailTab::tabs_for(&record(DeviceKind::Keyboard, caps)).contains(&DetailTab::Crown)
+        );
+    }
+
+    /// Capabilities are `None` until the device has been probed, and
+    /// `presumed_from_kind` never guesses a crown — so an offline Craft shows
+    /// no Crown tab rather than a panel whose dial may not exist.
+    #[test]
+    fn an_unprobed_keyboard_does_not_guess_a_crown_tab() {
+        assert!(
+            !DetailTab::tabs_for(&record(DeviceKind::Keyboard, None)).contains(&DetailTab::Crown)
+        );
+    }
+
+    /// The crown gates on capability alone, so a Craft misclassified as some
+    /// other kind keeps its dial (issue #127).
+    #[test]
+    fn a_misclassified_crown_device_keeps_the_tab() {
+        let caps = Some(Capabilities {
+            crown: true,
+            ..Capabilities::default()
+        });
+        assert!(
+            DetailTab::tabs_for(&record(DeviceKind::Unknown, caps)).contains(&DetailTab::Crown)
+        );
     }
 
     /// Each panel is independent: a lighting-only device (e.g. a keyboard with
