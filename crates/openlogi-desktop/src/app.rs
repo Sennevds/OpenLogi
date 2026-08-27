@@ -120,7 +120,8 @@ impl DetailTab {
         if caps.buttons && can_show_mouse_model {
             tabs.push(Self::Buttons);
         }
-        if caps.haptic_panel || (caps.buttons && can_show_mouse_model) {
+        let pointer_ring = caps.haptic_panel || (caps.buttons && can_show_mouse_model);
+        if pointer_ring {
             tabs.push(Self::ActionsRing);
         }
         // Function-row remapper when the keyboard reports remappable buttons.
@@ -132,6 +133,15 @@ impl DetailTab {
         // on kind would only cost a misclassified Craft its dial (issue #127).
         if caps.crown {
             tabs.push(Self::Crown);
+        }
+        // A crown control bound to `ShowActionsRing` opens this device's own
+        // ring — the layout is per-device and `action_ring_session` gates on
+        // nothing but an enabled, non-empty config — so a crown device needs
+        // the panel that edits it. Deliberately pushed *after* Keys/Crown
+        // rather than folded into `pointer_ring` above: the first tab is the
+        // one a device opens on, and a Craft should still land on Keys.
+        if caps.crown && !pointer_ring {
+            tabs.push(Self::ActionsRing);
         }
         if caps.pointer {
             tabs.push(Self::Pointer);
@@ -906,6 +916,67 @@ mod tests {
         let tabs = DetailTab::tabs_for(&record(DeviceKind::Keyboard, caps));
         assert!(tabs.contains(&DetailTab::Crown));
         assert!(tabs.contains(&DetailTab::Keys), "the F-row is unaffected");
+    }
+
+    /// A crown control can be bound to `ShowActionsRing`, and the ring's
+    /// layout is per-device, so a crown device must be able to edit its own.
+    #[test]
+    fn a_crown_keyboard_can_edit_its_actions_ring() {
+        let caps = Some(Capabilities {
+            buttons: true,
+            crown: true,
+            ..Capabilities::default()
+        });
+        let tabs = DetailTab::tabs_for(&record(DeviceKind::Keyboard, caps));
+        assert!(tabs.contains(&DetailTab::ActionsRing));
+    }
+
+    /// The ring tab must not displace Keys as the Craft's landing tab — the
+    /// first tab is what a freshly opened device shows.
+    #[test]
+    fn the_ring_tab_does_not_become_a_keyboards_first_tab() {
+        let caps = Some(Capabilities {
+            buttons: true,
+            crown: true,
+            ..Capabilities::default()
+        });
+        let tabs = DetailTab::tabs_for(&record(DeviceKind::Keyboard, caps));
+        assert_eq!(tabs.first(), Some(&DetailTab::Keys), "got: {tabs:?}");
+    }
+
+    /// A mouse keeps the ring where it was, right after Buttons.
+    #[test]
+    fn a_mouse_keeps_its_ring_tab_position() {
+        let caps = Some(Capabilities {
+            buttons: true,
+            ..Capabilities::default()
+        });
+        let tabs = DetailTab::tabs_for(&record(DeviceKind::Mouse, caps));
+        assert_eq!(
+            tabs.iter()
+                .take_while(|tab| **tab != DetailTab::Device)
+                .copied()
+                .collect::<Vec<_>>(),
+            vec![DetailTab::Buttons, DetailTab::ActionsRing]
+        );
+    }
+
+    /// One ring tab, never two, for a device that satisfies both arms.
+    #[test]
+    fn a_crown_device_with_a_haptic_panel_gets_one_ring_tab() {
+        let caps = Some(Capabilities {
+            buttons: true,
+            crown: true,
+            haptic_panel: true,
+            ..Capabilities::default()
+        });
+        let tabs = DetailTab::tabs_for(&record(DeviceKind::Keyboard, caps));
+        assert_eq!(
+            tabs.iter()
+                .filter(|tab| **tab == DetailTab::ActionsRing)
+                .count(),
+            1
+        );
     }
 
     #[test]
