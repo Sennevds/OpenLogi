@@ -24,9 +24,9 @@ use std::rc::Rc;
 // moment an ungated element calls one of its methods (see gui.md).
 use gpui::{
     Context, Entity, IntoElement, ParentElement, Render, Role, StatefulInteractiveElement as _,
-    Styled, Subscription, Window, div, px, svg,
+    Styled, Subscription, Window, div, prelude::FluentBuilder as _, px, svg,
 };
-use gpui_component::{Selectable as _, h_flex, v_flex};
+use gpui_component::{IconName, Selectable as _, h_flex, v_flex};
 use openlogi_core::binding::{Action, ButtonId, default_binding};
 
 use crate::features::mouse::picker::{
@@ -34,7 +34,7 @@ use crate::features::mouse::picker::{
 };
 use crate::state::{AppState, StateEvent};
 use crate::ui::action::localized_action_label;
-use crate::ui::components::MenuRow;
+use crate::ui::components::{MenuRow, control_button};
 use crate::ui::section::section_label;
 use crate::ui::theme::{self, Palette, Typography as _};
 
@@ -103,6 +103,16 @@ impl CrownPanel {
 
         let rows = action_rows("crown-action", current.as_ref(), &on_pick, pal);
 
+        // Only while a per-app profile is open, and only for a control that
+        // actually carries an override — otherwise there is nothing to revert
+        // to and the button would be a no-op. Picking the catalog's own "None"
+        // is not the same thing: that stores "do nothing in this app", where
+        // this drops the override so the default profile applies again.
+        let overridden = AppState::try_read(cx)
+            .and_then(AppState::editing_app_overrides)
+            .is_some_and(|overrides| overrides.contains_key(&button));
+        let view_for_clear = view.clone();
+
         compact_panel(pal)
             .w(px(PANEL_W))
             .child(
@@ -115,6 +125,20 @@ impl CrownPanel {
             )
             .child(divider(pal))
             .child(editor_scroll_list("crown-panel-scroll", rows))
+            .when(overridden, |panel| {
+                panel.child(divider(pal)).child(
+                    control_button("crown-use-default")
+                        .w_full()
+                        .icon(IconName::Undo)
+                        .label(tr!("Use the default profile"))
+                        .on_click(move |_event, _window, cx| {
+                            AppState::update_bindings(cx, |state| {
+                                state.clear_app_binding(button);
+                            });
+                            view_for_clear.update(cx, |_, vcx| vcx.notify());
+                        }),
+                )
+            })
     }
 }
 

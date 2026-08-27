@@ -118,7 +118,9 @@ pub(super) fn detail_content(
         }
         DetailTab::ActionsRing => action_ring_tab(panels.action_ring).into_any_element(),
         DetailTab::Keys => keys_tab(panels.keyboard_model).into_any_element(),
-        DetailTab::Crown => crown_tab(panels.crown_panel).into_any_element(),
+        DetailTab::Crown => {
+            crown_tab(panels.crown_panel, profile_icons, app_catalog, cx).into_any_element()
+        }
         DetailTab::Pointer => {
             pointer_tab(panels.dpi_panel, panels.smartshift_panel, cx).into_any_element()
         }
@@ -282,9 +284,24 @@ fn keys_tab(keyboard_model: &gpui::Entity<FunctionRowView>) -> impl IntoElement 
     tab_body(ContentWidth::DoubleExtraLarge, keyboard_model.clone()).justify_center()
 }
 
-/// Crown tab: the dial's bindable controls beside the action picker.
-fn crown_tab(crown_panel: &gpui::Entity<CrownPanel>) -> impl IntoElement {
-    tab_body(ContentWidth::Large, crown_panel.clone())
+/// Crown tab: the profile scope above the dial's controls and action picker.
+///
+/// Crown bindings are per-device `ButtonId` bindings, so they take a per-app
+/// overlay exactly like a mouse button's — the same profile bar the Buttons
+/// tab uses belongs here. (The Keys tab has no equivalent: F-row triggers live
+/// in one global `keyboard.bindings` map with no device or app dimension.)
+fn crown_tab(
+    crown_panel: &gpui::Entity<CrownPanel>,
+    profile_icons: &ProfileIconCache,
+    app_catalog: &gpui::Entity<AppCatalogPicker>,
+    cx: &mut Context<AppView>,
+) -> impl IntoElement {
+    v_flex()
+        .flex_1()
+        .w_full()
+        .min_h_0()
+        .children(profile_scope_bar(profile_icons, app_catalog, cx))
+        .child(tab_body(ContentWidth::Large, crown_panel.clone()))
 }
 
 fn action_ring_tab(panel: &gpui::Entity<ActionRingPanel>) -> impl IntoElement {
