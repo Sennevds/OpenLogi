@@ -67,13 +67,22 @@ Common device fields are:
   stays inert unless bound here, because the wheel reports taps from incidental
   thumb contact as well as from deliberate ones
   `CrownRotateUp`, `CrownRotateDown`, `CrownPress`, and `CrownTap` are the
-  Craft keyboard's crown dial. Like the F-row keys they have no GUI control
-  and stay native until bound here: diverting the crown takes over its
-  firmware volume function, so it is only diverted while one of the four
-  carries a real action. `CrownTap` is a touch tap with no press, reported
+  Craft keyboard's crown dial, editable in the GUI's Crown tab. They stay
+  native until bound: diverting the crown takes over its firmware volume
+  function, so it is only diverted while one of the four carries a real action
+  or the device has a `crown_modes` list. `CrownTap` is a touch tap with no press, reported
   from incidental finger contact while turning as well as from a deliberate
   tap. Rotation dispatches one action per detent, capped per report so a fast
   flick cannot fire an unbounded burst
+- `crown_modes`: an ordered list of what the crown dial does, cycled by the
+  `CycleCrownMode` action (bind it to `CrownTap`). Each mode names itself and
+  sets any of `rotate_up`, `rotate_down`, `press`; a control a mode leaves
+  unset falls through to that control's ordinary binding, so a mode can
+  redefine rotation while the press stays put. A mode never owns the tap —
+  otherwise a mode could strand you with no way to cycle out. Modes are
+  skipped while they set nothing, the active mode is agent state that is not
+  persisted (every device starts on its first mode), and a non-empty list is
+  enough to divert the crown on its own. No GUI editor yet: hand-edit this
 - `per_app_bindings`: sparse action overlays keyed by macOS bundle id, Linux
   application id, exact lower-cased Windows executable path, or
   `exe:<filename>.exe`. The Buttons panel edits these under its Profile

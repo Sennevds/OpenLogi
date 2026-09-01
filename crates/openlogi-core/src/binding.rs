@@ -14,6 +14,7 @@ mod action_ring;
 mod application_target;
 mod button;
 mod category;
+mod crown_mode;
 mod defaults;
 mod effect;
 mod gesture;
@@ -32,6 +33,7 @@ pub use action_ring::{
 pub use application_target::{ApplicationTarget, ApplicationTargetError};
 pub use button::ButtonId;
 pub use category::Category;
+pub use crown_mode::CrownMode;
 pub use defaults::{default_binding, default_binding_for, default_gesture_binding};
 pub use effect::{Effect, MediaKey, MouseButton, NativeAction, Script, Shortcut};
 pub use gesture::GestureDirection;

@@ -12,6 +12,7 @@
 
 pub mod action_ring;
 pub mod capture_plan;
+mod crown_mode;
 mod dpi;
 pub mod event_monitor;
 pub mod hardware;
@@ -21,4 +22,5 @@ pub mod receiver_access;
 pub mod runtime;
 pub mod watchers;
 
+pub use crown_mode::{CrownModeState, CrownModes};
 pub use dpi::{DpiCycleState, DpiCycles};

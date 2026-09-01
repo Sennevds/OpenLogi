@@ -301,6 +301,7 @@ mod tests {
 
     fn shared_runtime() -> SharedRuntime {
         SharedRuntime {
+            crown_modes: Arc::new(RwLock::new(openlogi_agent_core::CrownModes::default())),
             hook_maps: Arc::new(RwLock::new(HookMaps::default())),
             keyboard_bindings: Arc::new(RwLock::new(std::collections::BTreeMap::new())),
             scroll_preferences: Arc::new(ScrollPreferences::new(

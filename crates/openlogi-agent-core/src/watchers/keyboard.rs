@@ -24,6 +24,7 @@ use openlogi_hid::{
 use tokio::sync::{mpsc, oneshot};
 use tracing::{debug, info, warn};
 
+use crate::CrownModes;
 use crate::receiver_access::ReceiverAccess;
 use crate::runtime::{ActionDispatcher, HidppSessionId};
 
@@ -33,6 +34,11 @@ use crate::runtime::{ActionDispatcher, HidppSessionId};
 /// config / inventory / foreground-app changes.
 #[derive(Clone)]
 pub struct KeyboardSpec {
+    /// Live crown-mode state, consulted per event rather than snapshotted:
+    /// a tap changes the active mode without any config or inventory change,
+    /// so a value captured when this spec was built would be stale by the
+    /// time the very next rotation arrives.
+    pub crown_modes: Arc<RwLock<CrownModes>>,
     /// Stable config key used to scope lifecycle cancellation and hardware
     /// actions to this keyboard.
     pub config_key: String,
@@ -128,7 +134,8 @@ fn dispatch_input(
 ) {
     match input {
         CapturedInput::ButtonDown(button) => {
-            let binding = spec.bindings.get(&button);
+            let from_mode = mode_binding(spec, button);
+            let binding = from_mode.as_ref().or_else(|| spec.bindings.get(&button));
             if let Some(binding) = binding {
                 info!(button = %button, action = %binding.click_action().label(), "keyboard key → handling binding");
             } else {
@@ -140,10 +147,27 @@ fn dispatch_input(
             dispatcher.try_hidpp_button_up(session, button);
         }
         CapturedInput::ButtonPulse(button) => {
-            dispatcher.dispatch_hidpp_button_pulse(session, button, spec.bindings.get(&button));
+            let from_mode = mode_binding(spec, button);
+            dispatcher.dispatch_hidpp_button_pulse(
+                session,
+                button,
+                from_mode.as_ref().or_else(|| spec.bindings.get(&button)),
+            );
         }
         CapturedInput::Gesture(..) | CapturedInput::Scroll { .. } => {}
     }
+}
+
+/// The active crown mode's binding for `button`, if a mode claims it.
+///
+/// `None` means "fall through to the ordinary binding": either this device has
+/// no modes, or the active mode leaves this control alone. A mode never claims
+/// the tap (see [`openlogi_core::binding::CrownMode::action_for`]), so
+/// whatever cycles modes keeps working in every mode.
+fn mode_binding(spec: &KeyboardSpec, button: ButtonId) -> Option<Binding> {
+    let modes = spec.crown_modes.read().ok()?;
+    let action = modes.action_for(Some(&spec.config_key), button)?;
+    Some(Binding::Single(action.clone()))
 }
 
 /// Snapshot the keyboard session target unless pairing currently owns capture.

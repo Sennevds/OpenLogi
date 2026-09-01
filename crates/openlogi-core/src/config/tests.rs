@@ -395,6 +395,59 @@ fn smartshift_roundtrips_per_device() {
 }
 
 #[test]
+fn crown_modes_roundtrip_per_device_in_order() {
+    let mut cfg = Config::default();
+    let modes = vec![
+        CrownMode {
+            name: "Volume".into(),
+            rotate_up: Some(Action::VolumeUp),
+            rotate_down: Some(Action::VolumeDown),
+            press: Some(Action::PlayPause),
+        },
+        CrownMode {
+            name: "Scroll".into(),
+            rotate_up: Some(Action::ScrollUp),
+            rotate_down: Some(Action::ScrollDown),
+            press: None,
+        },
+    ];
+    cfg.set_crown_modes("2b034", modes.clone());
+    let restored = write_and_read(&cfg);
+    assert_eq!(
+        restored.crown_modes("2b034"),
+        modes,
+        "cycle order is the config order"
+    );
+    assert!(restored.crown_modes("absent").is_empty());
+}
+
+/// A device with no modes must not write an empty array into the file.
+#[test]
+fn unset_crown_modes_are_omitted_from_toml() {
+    let mut cfg = Config::default();
+    cfg.set_binding("2b034", ButtonId::CrownTap, Action::CycleCrownMode.into());
+    let toml = toml::to_string_pretty(&cfg).expect("serialize");
+    assert!(
+        !toml.contains("crown_modes"),
+        "empty mode list must be omitted, got:
+{toml}"
+    );
+}
+
+/// An older config without the field still loads.
+#[test]
+fn config_without_crown_modes_loads_with_none() {
+    let cfg: Config = toml::from_str(
+        r#"
+schema_version = 6
+[devices."2b034"]
+"#,
+    )
+    .expect("parse");
+    assert!(cfg.crown_modes("2b034").is_empty());
+}
+
+#[test]
 fn invert_scroll_roundtrips_per_device() {
     let mut cfg = Config::default();
     // Default is the native direction for any device, present or not.

@@ -6,7 +6,7 @@ use super::{
     pick_current, plan_reapply, reapply_targets, stable_id,
 };
 use openlogi_core::app::ForegroundApp;
-use openlogi_core::binding::{Action, Binding, ButtonId};
+use openlogi_core::binding::{Action, Binding, ButtonId, CrownMode};
 use openlogi_core::config::{
     Config, DeviceConfig, LightSettings, LinkConfig, ScrollResolution, VerticalScrollSensitivity,
 };
@@ -976,6 +976,93 @@ fn an_unprobed_keyboard_does_not_guess_a_crown() {
         ..dev("craft", 2, true)
     }];
     assert!(orch.keyboard_spec_for().is_none());
+}
+
+/// A mode list is the whole point of the feature but binds no control
+/// directly. Gating the divert on direct bindings alone would leave the crown
+/// native and the modes silently dead.
+#[test]
+fn a_mode_list_alone_arms_the_crown() {
+    let mut config = Config::default();
+    config.set_crown_modes(
+        "craft",
+        vec![CrownMode {
+            name: "Volume".into(),
+            rotate_up: Some(Action::VolumeUp),
+            rotate_down: Some(Action::VolumeDown),
+            press: None,
+        }],
+    );
+    let mut orch = orchestrator(config);
+    orch.devices = vec![AgentDevice {
+        kind: DeviceKind::Keyboard,
+        capabilities: Some(Capabilities {
+            buttons: true,
+            crown: true,
+            ..Capabilities::default()
+        }),
+        ..dev("craft", 2, true)
+    }];
+    let spec = orch
+        .keyboard_spec_for()
+        .expect("a mode list must arm the crown");
+    assert!(spec.targets.crown);
+}
+
+/// An empty list is not a binding — the dial stays native.
+#[test]
+fn an_empty_mode_list_leaves_the_crown_native() {
+    let mut config = Config::default();
+    config.set_crown_modes("craft", Vec::new());
+    let mut orch = orchestrator(config);
+    orch.devices = vec![AgentDevice {
+        kind: DeviceKind::Keyboard,
+        capabilities: Some(Capabilities {
+            buttons: true,
+            crown: true,
+            ..Capabilities::default()
+        }),
+        ..dev("craft", 2, true)
+    }];
+    assert!(orch.keyboard_spec_for().is_none());
+}
+
+/// The published mode state is what the watcher resolves rotation against, so
+/// a configured device must actually appear in it.
+#[test]
+fn republishing_exposes_a_configured_devices_modes() {
+    let mut config = Config::default();
+    config.set_crown_modes(
+        "craft",
+        vec![CrownMode {
+            name: "Volume".into(),
+            rotate_up: Some(Action::VolumeUp),
+            rotate_down: None,
+            press: None,
+        }],
+    );
+    let mut orch = orchestrator(config);
+    orch.devices = vec![AgentDevice {
+        kind: DeviceKind::Keyboard,
+        capabilities: Some(Capabilities {
+            crown: true,
+            ..Capabilities::default()
+        }),
+        ..dev("craft", 2, true)
+    }];
+    orch.republish_crown_modes();
+    let modes = orch.shared.crown_modes.read().expect("lock");
+    assert_eq!(modes.active_name(Some("craft")), Some("Volume"));
+    assert_eq!(
+        modes.action_for(Some("craft"), ButtonId::CrownRotateUp),
+        Some(&Action::VolumeUp)
+    );
+    // The mode leaves these alone: they must fall through to bindings.
+    assert_eq!(
+        modes.action_for(Some("craft"), ButtonId::CrownRotateDown),
+        None
+    );
+    assert_eq!(modes.action_for(Some("craft"), ButtonId::CrownTap), None);
 }
 
 #[test]

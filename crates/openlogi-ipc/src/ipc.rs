@@ -62,7 +62,9 @@ pub use succession::Identity;
 /// v29: `Capabilities::crown`, the `ButtonId::Crown*` controls, and
 ///      `HidppOperation::ReadCrown` appended (the Craft keyboard's crown
 ///      dial, HID++ `0x4600`).
-pub const PROTOCOL_VERSION: u32 = 29;
+/// v30: `Action::CycleCrownMode` appended — the crown's mode cycle. The mode
+///      list itself is config-only and never crosses the wire.
+pub const PROTOCOL_VERSION: u32 = 30;
 
 /// Environment variable through which the agent hands a supervised helper the
 /// run token it will serve, so the helper knows which agent it belongs to

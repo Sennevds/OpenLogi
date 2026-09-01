@@ -332,6 +332,7 @@ fn persisted_action_variant_names_are_stable() {
         "Copy",
         "CustomShortcut",
         "Cut",
+        "CycleCrownMode",
         "CycleDpiPresets",
         "Find",
         "HorizontalScrollLeft",

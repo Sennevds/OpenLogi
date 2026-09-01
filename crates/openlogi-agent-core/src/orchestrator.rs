@@ -38,7 +38,7 @@ use crate::runtime::hook::{HookMaps, SharedHookMaps};
 use crate::runtime::scroll::ScrollPreferences;
 use crate::watchers::host_switch::{HostSwitchLink, HostSwitchLinks};
 use crate::watchers::keyboard::{KeyboardSpec, SharedKeyboardSpec};
-use crate::{DpiCycleState, DpiCycles};
+use crate::{CrownModes, DpiCycleState, DpiCycles};
 
 /// The minimal per-device facts the agent needs: the config key (binding /
 /// preset lookup), the HID++ route (DPI/SmartShift writes + capture target), and
@@ -79,6 +79,9 @@ pub struct SharedRuntime {
     /// taking the orchestrator/config lock.
     pub scroll_preferences: Arc<ScrollPreferences>,
     pub dpi_cycle: Arc<RwLock<DpiCycles>>,
+    /// Which crown mode each device is currently in. Rebuilt from config on
+    /// reload; advanced by `Action::CycleCrownMode`.
+    pub crown_modes: Arc<RwLock<CrownModes>>,
     /// One capture plan per online device — what to divert and how to
     /// dispatch, keyed by the device the events arrive on. Carries each
     /// device's effective thumb-wheel sensitivity.
@@ -202,6 +205,7 @@ impl Orchestrator {
                 config.app_settings.vertical_scroll_sensitivity,
             )),
             dpi_cycle: Arc::new(RwLock::new(DpiCycles::default())),
+            crown_modes: Arc::new(RwLock::new(CrownModes::default())),
             capture_plans: Arc::new(RwLock::new(Vec::new())),
             capture_channel: Arc::new(RwLock::new(None)),
             channel_registry: ChannelRegistry::default(),
@@ -296,13 +300,19 @@ impl Orchestrator {
         // Diverting the crown takes over its native volume function, so it is
         // armed only for a keyboard that actually has one and only while one
         // of its controls carries a real binding — the same rule as a key.
+        // A mode list counts as a binding: with modes configured, rotation
+        // resolves through the active mode rather than through `bindings`, so
+        // gating on direct bindings alone would leave a mode-only crown
+        // undiverted and the whole feature silently dead.
+        let has_modes = !self.config.crown_modes(&dev.config_key).is_empty();
         let crown = dev.capabilities.is_some_and(|caps| caps.crown)
-            && ButtonId::CROWN_CONTROLS.iter().any(is_bound);
+            && (has_modes || ButtonId::CROWN_CONTROLS.iter().any(is_bound));
         let targets = KeyboardCaptureTargets { keys, crown };
         if targets.is_empty() {
             return None;
         }
         Some(KeyboardSpec {
+            crown_modes: Arc::clone(&self.shared.crown_modes),
             config_key: dev.config_key.clone(),
             route: dev.route.clone()?,
             targets,
@@ -335,6 +345,7 @@ impl Orchestrator {
             "capture_plans",
         );
         self.rebuild_dpi_cycles(self.current_key());
+        self.republish_crown_modes();
         // Keyboard F-key bindings are global (not per-device), so they key off
         // the top-level config map rather than the selected device. Published
         // here so `reload_config` (GUI commit) takes effect live, not only on
@@ -360,6 +371,28 @@ impl Orchestrator {
     /// preserving a device's live cycle index (and lazily discovered
     /// capabilities) across rebuilds whose presets did not change — a config
     /// reload must not snap DPI back to `preset[0]`.
+    /// Push each device's configured crown-mode list into the shared state.
+    ///
+    /// Unlike the DPI rebuild this keeps offline devices: a crown mode is
+    /// host-side state with no device write behind it, so a sleeping keyboard
+    /// that wakes mid-session should still be in the mode the user left it in.
+    fn republish_crown_modes(&self) {
+        let Ok(mut guard) = self.shared.crown_modes.write() else {
+            warn!("crown_modes lock poisoned — republish skipped");
+            return;
+        };
+        let lists = self
+            .devices
+            .iter()
+            .filter(|dev| self.config.device_enabled(&dev.config_key))
+            .filter_map(|dev| {
+                let modes = self.config.crown_modes(&dev.config_key);
+                (!modes.is_empty()).then(|| (dev.config_key.clone(), modes))
+            })
+            .collect();
+        guard.republish(lists);
+    }
+
     fn rebuild_dpi_cycles(&self, selected: Option<&str>) {
         let Ok(mut guard) = self.shared.dpi_cycle.write() else {
             warn!("dpi_cycle lock poisoned — rebuild skipped");

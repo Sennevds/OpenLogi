@@ -187,6 +187,12 @@ pub enum Action {
     /// cancellation and shutdown. Dispatchers without a release context must
     /// degrade this action to a balanced tap rather than leave keys held.
     HoldShortcut(KeyCombo),
+    /// Advance the crown to its next configured mode, changing what rotating
+    /// the dial does. Agent-side state, like the DPI cycle: no injected
+    /// output of its own. Inert on a device with no mode list.
+    ///
+    /// Appended last — the serde variant index is the wire format.
+    CycleCrownMode,
 }
 
 /// One step in a [`Action::Workflow`]. A workflow is a `Vec<WorkflowStep>`
@@ -280,6 +286,8 @@ macro_rules! for_each_unit_action {
             // DPI
             CycleDpiPresets "Cycle DPI Presets" Dpi Gauge,
             ToggleSmartShift "Toggle SmartShift" Dpi Refresh,
+            // Crown
+            CycleCrownMode "Cycle Crown Mode" Dpi Refresh,
             // Scroll
             ScrollUp "Scroll Up" Scroll ArrowUp,
             ScrollDown "Scroll Down" Scroll ArrowDown,

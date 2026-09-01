@@ -266,6 +266,7 @@ impl Action {
             | Action::SetDpiPreset(_)
             | Action::ToggleSmartShift
             | Action::ShowActionsRing
+            | Action::CycleCrownMode
             | Action::OpenApplication(_) => Effect::AgentSide,
 
             Action::ScrollUp => Effect::Scroll { dx: 0, dy: 1 },

@@ -10,7 +10,7 @@ use super::settings::{
     CameraControls, GestureOwner, LightSettings, Lighting, ScrollResolution, SmartShift,
     ThumbwheelSensitivity, deserialize_gesture_owner,
 };
-use crate::binding::{Action, ActionRingConfig, Binding, ButtonId, GestureDirection};
+use crate::binding::{Action, ActionRingConfig, Binding, ButtonId, CrownMode, GestureDirection};
 use crate::device::{Capabilities, DeviceKind, DeviceModelInfo, LightCapabilities};
 use crate::hid::Dpi;
 
@@ -198,6 +198,11 @@ pub struct DeviceConfig {
     /// Host-rendered Actions Ring settings and complete per-application layouts.
     #[serde(default, skip_serializing_if = "ActionRingConfig::is_default")]
     pub action_ring: ActionRingConfig,
+    /// Ordered crown modes cycled by [`Action::CycleCrownMode`]. Empty means
+    /// "no modes configured", and the crown's controls then use their ordinary
+    /// bindings — the cycle action becomes a no-op rather than an error.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub crown_modes: Vec<CrownMode>,
     /// Ordered list of DPI presets cycled through by
     /// [`Action::CycleDpiPresets`] and indexed by
     /// [`Action::SetDpiPreset`]. Empty means "no presets configured" —
@@ -357,6 +362,7 @@ impl Default for DeviceConfig {
             disabled_gestures: BTreeMap::new(),
             per_app_bindings: BTreeMap::new(),
             action_ring: ActionRingConfig::default(),
+            crown_modes: Vec::new(),
             dpi_presets: Vec::new(),
             dpi: None,
             lighting: None,
@@ -464,6 +470,8 @@ struct RawDeviceConfig {
     per_app_bindings: BTreeMap<String, BTreeMap<ButtonId, Action>>,
     #[serde(default)]
     action_ring: ActionRingConfig,
+    #[serde(default)]
+    crown_modes: Vec<CrownMode>,
     #[serde(default, deserialize_with = "deserialize_dpi_presets")]
     dpi_presets: Vec<Dpi>,
     #[serde(default, deserialize_with = "deserialize_optional_dpi")]
@@ -537,6 +545,7 @@ impl From<RawDeviceConfig> for DeviceConfig {
             disabled_gestures: raw.disabled_gestures,
             per_app_bindings: raw.per_app_bindings,
             action_ring: raw.action_ring,
+            crown_modes: raw.crown_modes,
             dpi_presets: raw.dpi_presets,
             dpi: raw.dpi,
             lighting: raw.lighting,

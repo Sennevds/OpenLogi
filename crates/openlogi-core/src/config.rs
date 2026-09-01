@@ -38,8 +38,8 @@ pub use settings::{
 };
 
 use crate::binding::{
-    Action, ActionRingConfig, ActionRingIcon, ActionRingSlot, Binding, ButtonId, GestureDirection,
-    RingAction, default_binding, default_binding_for, default_gesture_binding,
+    Action, ActionRingConfig, ActionRingIcon, ActionRingSlot, Binding, ButtonId, CrownMode,
+    GestureDirection, RingAction, default_binding, default_binding_for, default_gesture_binding,
 };
 use crate::device_order::PhysicalDeviceKey;
 use crate::hid::Dpi;
@@ -618,6 +618,25 @@ impl Config {
             .get(device_key)
             .map(|device| device.action_ring.clone())
             .unwrap_or_default()
+    }
+
+    /// Crown modes for `device_key`, in cycle order. Empty when the device has
+    /// none configured, which leaves every crown control on its ordinary
+    /// binding.
+    #[must_use]
+    pub fn crown_modes(&self, device_key: &str) -> Vec<CrownMode> {
+        self.devices
+            .get(device_key)
+            .map(|device| device.crown_modes.clone())
+            .unwrap_or_default()
+    }
+
+    /// Replace `device_key`'s crown modes.
+    pub fn set_crown_modes(&mut self, device_key: &str, modes: Vec<CrownMode>) {
+        self.devices
+            .entry(device_key.to_string())
+            .or_default()
+            .crown_modes = modes;
     }
 
     /// Enable or disable `device_key`'s Actions Ring.

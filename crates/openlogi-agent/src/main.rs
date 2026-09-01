@@ -180,6 +180,7 @@ impl InputServices {
         let (sender, triggers) = tokio::sync::mpsc::unbounded_channel();
         let action_runtime = match ActionRuntime::new(
             shared.dpi_cycle.clone(),
+            shared.crown_modes.clone(),
             shared.capture_channel.clone(),
             shared.channel_registry.clone(),
             shared.receiver_access.clone(),

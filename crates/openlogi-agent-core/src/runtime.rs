@@ -16,7 +16,7 @@ use std::time::{Duration, Instant};
 
 use openlogi_core::binding::{Action, Binding, ButtonId, KeyCombo};
 use openlogi_hid::{CaptureChannel, ChannelRegistry};
-use tracing::{info, warn};
+use tracing::{debug, info, warn};
 
 use self::button::{
     ButtonInputHandle, ButtonRuntimeEvent, ButtonRuntimeOwner, EndReason, PressControl,
@@ -24,7 +24,7 @@ use self::button::{
 pub(crate) use self::button::{HidppSessionId, PressToken};
 use crate::hardware::{toggle_smartshift_in_background, write_dpi_in_background};
 use crate::receiver_access::ReceiverAccess;
-use crate::{DpiCycleState, DpiCycles};
+use crate::{CrownModeState, CrownModes, DpiCycleState, DpiCycles};
 
 /// Output transition when an action starts within one physical press.
 #[derive(Debug, PartialEq, Eq)]
@@ -67,6 +67,7 @@ impl HeldShortcuts {
 #[derive(Clone)]
 struct ActionExecutor {
     dpi_cycle: Arc<RwLock<DpiCycles>>,
+    crown_modes: Arc<RwLock<CrownModes>>,
     capture: CaptureChannel,
     registry: ChannelRegistry,
     receiver_access: ReceiverAccess,
@@ -94,6 +95,25 @@ impl ActionExecutor {
                     None
                 }
             },
+            // Agent-side like the DPI cycle: the tap changes what a *later*
+            // rotation resolves to and injects nothing itself.
+            Action::CycleCrownMode => {
+                match self.crown_modes.write() {
+                    Ok(mut guard) => {
+                        let cycled = guard
+                            .state_for(device_key)
+                            .and_then(CrownModeState::cycle)
+                            .map(|mode| mode.name.clone());
+                        if let Some(name) = cycled {
+                            info!(mode = %name, "crown mode cycled");
+                        } else {
+                            debug!("crown mode cycle: no usable modes");
+                        }
+                    }
+                    Err(e) => warn!(error = %e, "crown_modes lock poisoned — cycle skipped"),
+                }
+                return;
+            }
             Action::SetDpiPreset(i) => match self.dpi_cycle.write() {
                 Ok(mut guard) => guard
                     .state_for(device_key)
@@ -228,6 +248,7 @@ impl ActionRuntime {
     /// Build the action executor and its source-independent button worker.
     pub fn new(
         dpi_cycle: Arc<RwLock<DpiCycles>>,
+        crown_modes: Arc<RwLock<CrownModes>>,
         capture: CaptureChannel,
         registry: ChannelRegistry,
         receiver_access: ReceiverAccess,
@@ -235,6 +256,7 @@ impl ActionRuntime {
     ) -> io::Result<Self> {
         let executor = ActionExecutor {
             dpi_cycle,
+            crown_modes,
             capture,
             registry,
             receiver_access,
