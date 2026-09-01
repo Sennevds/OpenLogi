@@ -253,6 +253,10 @@ impl CrownTranslator {
 
     fn sample(&mut self, sample: CrownSample) -> Vec<CapturedInput> {
         let mut out = Vec::new();
+        // Whether the button is involved in this event, captured before the
+        // press edges below mutate `pressed`. See the tap suppression at the
+        // end of this function.
+        let button_involved = self.pressed || !matches!(sample.button, ButtonState::Inactive);
 
         let steps = self.rotation_steps(sample);
         let direction = if steps > 0 {
@@ -279,7 +283,12 @@ impl CrownTranslator {
             _ => {}
         }
 
-        if sample.tap {
+        // A tap reported while the button is involved is the press's own finger
+        // contact, not a deliberate touch tap: pressing the crown necessarily
+        // touches the capacitive sensor above it, and the firmware puts the
+        // gesture and the button state in one packet. Emitting both made a
+        // single press run the press action *and* the tap action.
+        if sample.tap && !button_involved {
             out.push(CapturedInput::ButtonPulse(ButtonId::CrownTap));
         }
 
@@ -504,6 +513,75 @@ mod tests {
         // `CrownGesture::DoubleTap` converts to `tap: false` — the firmware
         // reports it alongside the tap that began it.
         assert!(t.sample(idle()).is_empty());
+    }
+
+    /// Pressing the crown touches its capacitive sensor, so the firmware
+    /// reports a tap in the same packet. Dispatching both made one press run
+    /// the press action *and* the tap action — which, with the tap bound to
+    /// the mode cycle, meant clicking the dial changed mode.
+    #[test]
+    fn a_press_that_also_reports_a_tap_does_not_pulse_the_tap() {
+        let mut t = CrownTranslator::new(8);
+        assert_eq!(
+            t.sample(CrownSample {
+                button: ButtonState::Press,
+                tap: true,
+                ..idle()
+            }),
+            vec![CapturedInput::ButtonDown(ButtonId::CrownPress)],
+            "the press is the event; the tap is its finger"
+        );
+    }
+
+    /// The tap can also arrive while the press is still being held, or as the
+    /// finger lifts off.
+    #[test]
+    fn a_tap_while_held_or_releasing_is_suppressed() {
+        let mut t = CrownTranslator::new(8);
+        t.sample(CrownSample {
+            button: ButtonState::Press,
+            ..idle()
+        });
+        assert!(
+            t.sample(CrownSample {
+                button: ButtonState::LongPressActive,
+                tap: true,
+                ..idle()
+            })
+            .is_empty(),
+            "a tap mid-hold is the held finger"
+        );
+        assert_eq!(
+            t.sample(CrownSample {
+                button: ButtonState::Release,
+                tap: true,
+                ..idle()
+            }),
+            vec![CapturedInput::ButtonUp(ButtonId::CrownPress)],
+            "a tap on release is the finger leaving"
+        );
+    }
+
+    /// The whole point of the suppression is that it is narrow: a touch tap
+    /// with no button activity is still a tap.
+    #[test]
+    fn a_tap_after_the_button_goes_idle_still_pulses() {
+        let mut t = CrownTranslator::new(8);
+        t.sample(CrownSample {
+            button: ButtonState::Press,
+            ..idle()
+        });
+        t.sample(CrownSample {
+            button: ButtonState::Release,
+            ..idle()
+        });
+        assert_eq!(
+            t.sample(CrownSample {
+                tap: true,
+                ..idle()
+            }),
+            vec![CapturedInput::ButtonPulse(ButtonId::CrownTap)]
+        );
     }
 
     #[test]
