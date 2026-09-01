@@ -4,29 +4,30 @@
 //! is deliberately absent from that set — it is what cycles modes, so a mode
 //! that could rebind it would strand the user inside itself.
 //!
-//! Rendering only. The list belongs to whichever profile
-//! `AppState::editing_app` has open, and every edit goes through `AppState`'s
-//! crown-mode commits, so this module never touches config directly.
+//! A per-app list replaces the device's wholesale rather than merging into it,
+//! so **ownership is shown, never inferred**: an app profile with no list of
+//! its own renders the device's list read-only, and two explicit buttons are
+//! the only ways to start editing. Letting an edit fork the device's list
+//! silently is what made an app profile look like it had copied the default.
+//!
+//! Rendering only — every edit goes through `AppState`'s crown-mode commits.
 
 use gpui::{
-    AppContext as _, Entity, IntoElement, ParentElement, Role, SharedString,
-    StatefulInteractiveElement as _, Styled, Window, div, prelude::FluentBuilder as _, px, svg,
+    Entity, IntoElement, ParentElement, Role, StatefulInteractiveElement as _, Styled, div,
+    prelude::FluentBuilder as _, px, svg,
 };
 use gpui_component::{
-    Icon, IconName, Selectable as _, Sizable as _, WindowExt as _,
+    Icon, IconName, Selectable as _, Sizable as _,
     button::{Button, ButtonVariants as _},
-    dialog::DialogButtonProps,
-    h_flex,
-    input::InputState,
-    v_flex,
+    h_flex, v_flex,
 };
 use openlogi_core::binding::{Action, ButtonId, CrownMode};
 
 use super::{CrownPanel, LIST_W, Target};
 use crate::features::mouse::picker::{action_icon_path, compact_panel, divider};
-use crate::state::AppState;
+use crate::state::{AppState, CrownModeOwnership};
 use crate::ui::action::localized_action_label;
-use crate::ui::components::{MenuRow, control_button, control_input};
+use crate::ui::components::{MenuRow, control_button};
 use crate::ui::section::section_label;
 use crate::ui::theme::{Palette, Typography as _};
 
@@ -37,26 +38,45 @@ pub(super) const MODE_CONTROLS: [ButtonId; 3] = [
     ButtonId::CrownPress,
 ];
 
-/// The whole modes section: heading, one card per mode, and the add button.
+/// Everything the section needs about the list it is drawing.
+pub(super) struct ModesView<'a> {
+    /// The modes in cycle order.
+    pub modes: &'a [CrownMode],
+    /// Whether the open profile owns them or is only showing the device's.
+    pub ownership: CrownModeOwnership,
+    /// Whether a per-app profile is open, which decides the revert affordance.
+    pub in_app_profile: bool,
+    /// Whether any crown control actually runs `CycleCrownMode`.
+    pub cycles_modes: bool,
+    /// What the picker beside the list is open on.
+    pub selected: Option<Target>,
+}
+
+impl ModesView<'_> {
+    fn editable(&self) -> bool {
+        self.ownership == CrownModeOwnership::Owned
+    }
+}
+
+/// The whole modes section: heading, one card per mode, and the ownership or
+/// add affordances the current state allows.
 pub(super) fn modes_section(
-    modes: &[CrownMode],
-    cycles_modes: bool,
-    overridden: bool,
-    selected: Option<Target>,
-    view: &Entity<CrownPanel>,
+    view: &ModesView<'_>,
+    panel: &Entity<CrownPanel>,
     pal: Palette,
 ) -> gpui::Div {
+    let editable = view.editable();
     v_flex()
         .gap_2()
         .w(px(LIST_W))
-        .child(heading(modes, cycles_modes, pal))
+        .child(heading(view, pal))
         .children(
-            modes
+            view.modes
                 .iter()
                 .enumerate()
-                .map(|(index, mode)| mode_card(index, mode, selected, view, pal)),
+                .map(|(index, mode)| mode_card(index, mode, view, panel, pal)),
         )
-        .when(modes.is_empty(), |section| {
+        .when(view.modes.is_empty() && editable, |section| {
             section.child(
                 compact_panel(pal).child(
                     div()
@@ -67,8 +87,32 @@ pub(super) fn modes_section(
                 ),
             )
         })
-        .child(add_mode_button())
-        .when(overridden, |section| {
+        .when(editable, |section| section.child(add_mode_button()))
+        .when(!editable, |section| {
+            // The two explicit ways to start editing. Nothing else in this
+            // panel writes a per-app list, so an app profile can never end up
+            // holding a copy of the device's modes the user did not ask for.
+            section
+                .child(
+                    control_button("crown-modes-own")
+                        .w_full()
+                        .icon(IconName::Plus)
+                        .label(tr!("Give this app its own modes"))
+                        .on_click(|_event, _window, cx| {
+                            AppState::update_bindings(cx, AppState::start_app_crown_modes);
+                        }),
+                )
+                .child(
+                    control_button("crown-modes-copy")
+                        .w_full()
+                        .icon(IconName::Copy)
+                        .label(tr!("Copy the default modes"))
+                        .on_click(|_event, _window, cx| {
+                            AppState::update_bindings(cx, AppState::copy_default_crown_modes);
+                        }),
+                )
+        })
+        .when(editable && view.in_app_profile, |section| {
             section.child(
                 control_button("crown-modes-use-default")
                     .w_full()
@@ -81,12 +125,18 @@ pub(super) fn modes_section(
         })
 }
 
-/// Section heading, plus the one warning worth surfacing: modes nobody can
-/// reach. A list no control cycles is configuration with no effect, and the fix
-/// is a control binding one panel above — so say so, rather than leaving the
-/// user to discover the dial ignoring them.
-fn heading(modes: &[CrownMode], cycles_modes: bool, pal: Palette) -> gpui::Div {
-    let unreachable = !modes.is_empty() && !cycles_modes;
+/// Section heading plus the one line of state worth saying out loud: whose
+/// modes these are, or that nothing can reach them.
+fn heading(view: &ModesView<'_>, pal: Palette) -> gpui::Div {
+    let unreachable = !view.modes.is_empty() && !view.cycles_modes;
+    let inherited = !view.editable();
+    let caption = if inherited {
+        tr!("This app cycles the default profile's modes.")
+    } else if unreachable {
+        tr!("Bind a control to Cycle Crown Mode to reach these.")
+    } else {
+        tr!("Cycled by whichever control runs Cycle Crown Mode.")
+    };
     v_flex()
         .w_full()
         .gap_0p5()
@@ -94,45 +144,53 @@ fn heading(modes: &[CrownMode], cycles_modes: bool, pal: Palette) -> gpui::Div {
         .child(
             div()
                 .text_caption()
-                .text_color(if unreachable {
+                .text_color(if unreachable && !inherited {
                     pal.text_primary
                 } else {
                     pal.text_muted
                 })
-                .child(if unreachable {
-                    tr!("Bind a control to Cycle Crown Mode to reach these.")
-                } else {
-                    tr!("Cycled by whichever control runs Cycle Crown Mode.")
-                }),
+                .child(caption),
         )
 }
 
 /// One mode: its name, the rename and remove buttons, and its three controls.
+///
+/// An inherited card is inert — no buttons, no selectable rows — because every
+/// edit it could offer would fork the device's list into this app.
 fn mode_card(
     index: usize,
     mode: &CrownMode,
-    selected: Option<Target>,
-    view: &Entity<CrownPanel>,
+    view: &ModesView<'_>,
+    panel: &Entity<CrownPanel>,
     pal: Palette,
 ) -> gpui::Div {
     compact_panel(pal)
         .w_full()
-        .child(card_header(index, mode, pal))
+        .child(card_header(index, mode, view.editable(), panel, pal))
         .child(divider(pal))
         .children(MODE_CONTROLS.iter().copied().map(|control| {
             mode_control_row(
                 index,
                 control,
                 mode.action_for(control),
-                selected == Some(Target::ModeControl(index, control)),
-                view,
+                MoreRow {
+                    selected: view.selected == Some(Target::ModeControl(index, control)),
+                    editable: view.editable(),
+                },
+                panel,
                 pal,
             )
         }))
 }
 
-fn card_header(index: usize, mode: &CrownMode, pal: Palette) -> gpui::Div {
-    let name = mode.name.clone();
+fn card_header(
+    index: usize,
+    mode: &CrownMode,
+    editable: bool,
+    panel: &Entity<CrownPanel>,
+    pal: Palette,
+) -> gpui::Div {
+    let panel_for_rename = panel.clone();
     h_flex()
         .w_full()
         .px_2()
@@ -148,28 +206,37 @@ fn card_header(index: usize, mode: &CrownMode, pal: Palette) -> gpui::Div {
                 .text_color(pal.text_muted)
                 .child(tr!("Empty"))
         }))
-        .child(
-            Button::new(("crown-mode-rename", index))
-                .xsmall()
-                .ghost()
-                .icon(Icon::empty().path("action-icons/pencil.svg"))
-                .on_click(move |_event, window, cx| {
-                    let kind = NameDialog::Rename {
-                        index,
-                        current: name.clone(),
-                    };
-                    open_name_dialog(kind, window, cx);
-                }),
-        )
-        .child(
-            Button::new(("crown-mode-remove", index))
-                .xsmall()
-                .ghost()
-                .icon(IconName::Close)
-                .on_click(move |_event, _window, cx| {
-                    AppState::update_bindings(cx, |state| state.remove_crown_mode(index));
-                }),
-        )
+        .when(editable, |header| {
+            header
+                .child(
+                    Button::new(("crown-mode-rename", index))
+                        .xsmall()
+                        .ghost()
+                        .icon(Icon::empty().path("action-icons/pencil.svg"))
+                        .on_click(move |_event, _window, cx| {
+                            panel_for_rename.update(cx, |panel, vcx| {
+                                panel.select(Target::Mode(index), vcx);
+                            });
+                        }),
+                )
+                .child(
+                    Button::new(("crown-mode-remove", index))
+                        .xsmall()
+                        .ghost()
+                        .icon(IconName::Close)
+                        .on_click(move |_event, _window, cx| {
+                            AppState::update_bindings(cx, |state| state.remove_crown_mode(index));
+                        }),
+                )
+        })
+}
+
+/// The two per-row flags, kept together so the row helper stays inside the
+/// argument-count limit.
+#[derive(Clone, Copy)]
+struct MoreRow {
+    selected: bool,
+    editable: bool,
 }
 
 /// One control inside a mode. "Falls through" is the honest label for an unset
@@ -179,11 +246,11 @@ fn mode_control_row(
     index: usize,
     control: ButtonId,
     action: Option<&Action>,
-    selected: bool,
-    view: &Entity<CrownPanel>,
+    row: MoreRow,
+    panel: &Entity<CrownPanel>,
     pal: Palette,
 ) -> MenuRow {
-    let view = view.clone();
+    let panel = panel.clone();
     let label = action.map_or_else(|| tr!("Falls through"), localized_action_label);
     // Keyed by mode and control rather than row position, so adding a mode does
     // not move focus between existing rows.
@@ -191,7 +258,7 @@ fn mode_control_row(
         "crown-mode-control",
         index * MODE_CONTROLS.len() + control_slot(control),
     ))
-    .selected(selected)
+    .selected(row.selected)
     .role(Role::MenuItem)
     .aria_label(tr!(control.label()))
     .child(
@@ -218,7 +285,10 @@ fn mode_control_row(
             .child(label),
     )
     .on_click(move |_event, _window, cx| {
-        view.update(cx, |panel, vcx| {
+        if !row.editable {
+            return;
+        }
+        panel.update(cx, |panel, vcx| {
             panel.select(Target::ModeControl(index, control), vcx);
         });
     })
@@ -233,76 +303,20 @@ fn control_slot(control: ButtonId) -> usize {
         .unwrap_or(MODE_CONTROLS.len())
 }
 
+/// Adds a mode immediately, the way the DPI panel's "+" adds a preset —
+/// one click, named `Mode N`, renamed afterwards if the default won't do. A
+/// dialog in front of this would be one more thing between the user and a list
+/// they are still assembling.
 fn add_mode_button() -> impl IntoElement {
     control_button("crown-mode-add")
         .w_full()
         .icon(IconName::Plus)
         .label(tr!("Add mode"))
-        .on_click(|_event, window, cx| {
-            open_name_dialog(NameDialog::Add, window, cx);
+        .on_click(|_event, _window, cx| {
+            AppState::update_bindings(cx, |state| {
+                let name = state
+                    .next_crown_mode_name(|n| tr!("Mode %{n}", n => n.to_string()).to_string());
+                state.add_crown_mode(name);
+            });
         })
-}
-
-/// Which commit a name dialog performs when confirmed.
-#[derive(Clone)]
-enum NameDialog {
-    /// Append a new mode under the entered name.
-    Add,
-    /// Rename the mode at this index, opening on its current name.
-    Rename { index: usize, current: String },
-}
-
-impl NameDialog {
-    fn title(&self) -> SharedString {
-        match self {
-            Self::Add => tr!("Add mode"),
-            Self::Rename { .. } => tr!("Rename mode"),
-        }
-    }
-
-    fn initial(&self) -> String {
-        match self {
-            Self::Add => String::new(),
-            Self::Rename { current, .. } => current.clone(),
-        }
-    }
-
-    fn commit(&self, name: String, cx: &mut gpui::App) {
-        let kind = self.clone();
-        AppState::update_bindings(cx, move |state| match kind {
-            Self::Add => state.add_crown_mode(name),
-            Self::Rename { index, .. } => state.rename_crown_mode(index, &name),
-        });
-    }
-}
-
-/// Name a mode. Modelled on the device rename dialog; a blank name is refused
-/// by the commit itself, since the name is all the mode indicator can show.
-fn open_name_dialog(kind: NameDialog, window: &mut Window, cx: &mut gpui::App) {
-    let input = cx.new(|cx| {
-        let mut input = InputState::new(window, cx).placeholder(tr!("Volume, Zoom, Tabs…"));
-        input.set_value(kind.initial(), window, cx);
-        input
-    });
-    window.open_dialog(cx, move |dialog, window, cx| {
-        input.update(cx, |input, cx| input.focus(window, cx));
-        dialog
-            .w(px(360.))
-            .title(kind.title())
-            .child(v_flex().gap_2().child(control_input(&input)))
-            .button_props(
-                DialogButtonProps::default()
-                    .ok_text(tr!("Save"))
-                    .cancel_text(tr!("Cancel"))
-                    .show_cancel(true),
-            )
-            .on_ok({
-                let input = input.clone();
-                let kind = kind.clone();
-                move |_, _, cx| {
-                    kind.commit(input.read(cx).value().to_string(), cx);
-                    true
-                }
-            })
-    });
 }

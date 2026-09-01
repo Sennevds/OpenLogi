@@ -670,13 +670,17 @@ impl Config {
     /// [`DeviceConfig::per_app_crown_modes`]). Resolution goes through the same
     /// matcher as the per-app binding overlays, so a Windows `exe:` key matches
     /// a foreground executable path the way a button override does.
+    ///
+    /// An app whose entry is present but *empty* owns an empty list: it cycles
+    /// nothing and its crown controls stay on their ordinary bindings. Only an
+    /// absent entry inherits the device's list. Conflating the two would make
+    /// deleting an app's last mode silently resurrect the default list.
     #[must_use]
     pub fn effective_crown_modes(&self, device_key: &str, app: Option<&str>) -> Vec<CrownMode> {
         let Some(device) = self.devices.get(device_key) else {
             return Vec::new();
         };
         app.and_then(|app| app_overlay(&device.per_app_crown_modes, app))
-            .filter(|modes| !modes.is_empty())
             .unwrap_or(&device.crown_modes)
             .clone()
     }
@@ -689,24 +693,33 @@ impl Config {
     /// author here", which is what an editor shows and clears, while
     /// [`Self::effective_crown_modes`] answers "what will the app in front
     /// cycle" and goes through the matcher.
+    ///
+    /// `Some(empty)` is a real answer and means the app owns a list with
+    /// nothing in it; `None` means it inherits the device's.
     #[must_use]
     pub fn per_app_crown_modes(&self, device_key: &str, app: &str) -> Option<&Vec<CrownMode>> {
-        self.devices
-            .get(device_key)?
-            .per_app_crown_modes
-            .get(app)
-            .filter(|modes| !modes.is_empty())
+        self.devices.get(device_key)?.per_app_crown_modes.get(app)
     }
 
-    /// Replace `device_key`'s crown modes for the application key `app`. An
-    /// empty list removes the override, so the app falls back to the device's
-    /// default list rather than storing "this app has no modes".
+    /// Give the application key `app` its own crown-mode list on `device_key`,
+    /// replacing any it already had.
+    ///
+    /// An empty `modes` is stored as an empty list, not as a removal: it means
+    /// "this app has no modes", which is a different statement from "this app
+    /// uses the device's". [`Self::clear_per_app_crown_modes`] is the removal.
     pub fn set_per_app_crown_modes(&mut self, device_key: &str, app: &str, modes: Vec<CrownMode>) {
-        let device = self.devices.entry(device_key.to_string()).or_default();
-        if modes.is_empty() {
+        self.devices
+            .entry(device_key.to_string())
+            .or_default()
+            .per_app_crown_modes
+            .insert(app.to_string(), modes);
+    }
+
+    /// Drop `app`'s own crown-mode list on `device_key`, so it inherits the
+    /// device's list again. Nothing happens when it had none.
+    pub fn clear_per_app_crown_modes(&mut self, device_key: &str, app: &str) {
+        if let Some(device) = self.devices.get_mut(device_key) {
             device.per_app_crown_modes.remove(app);
-        } else {
-            device.per_app_crown_modes.insert(app.to_string(), modes);
         }
     }
 
@@ -840,7 +853,10 @@ impl Config {
     pub fn has_app_override(&self, device_key: &str, app: &str) -> bool {
         self.devices.get(device_key).is_some_and(|d| {
             app_overlay(&d.per_app_bindings, app).is_some_and(|overlay| !overlay.is_empty())
-                || app_overlay(&d.per_app_crown_modes, app).is_some_and(|modes| !modes.is_empty())
+                // Present-but-empty counts: an app deliberately given a dial
+                // with no modes is overridden, and its dial behaves
+                // differently from every other app's.
+                || app_overlay(&d.per_app_crown_modes, app).is_some()
         })
     }
 

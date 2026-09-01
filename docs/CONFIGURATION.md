@@ -92,9 +92,16 @@ Common device fields are:
   position would silently change what a tap reaches next. Apps that share the
   default list hand the dial over in whatever mode it was left in; entering an
   app with its own list starts that list at its first mode, since the old
-  position pointed into a list this app never cycled. Removing an app's last
-  mode drops the override, so the app inherits the default list again — an
-  empty override and "inherit" are the same thing in the file
+  position pointed into a list this app never cycled.
+
+  An **absent** entry means "this app uses the device's list"; an entry that is
+  present but **empty** (`per_app_crown_modes."exe:game.exe" = []`) means "this
+  app has no modes", and its crown controls stay on their ordinary bindings.
+  The two are deliberately different: conflating them made deleting an app's
+  last mode resurrect the whole default list. In the GUI an app profile shows
+  the inherited list read-only until you pick *Give this app its own modes*
+  (starts empty) or *Copy the default modes* (forks the device's); *Use the
+  default profile's modes* removes the entry again
 - `per_app_bindings`: sparse action overlays keyed by macOS bundle id, Linux
   application id, exact lower-cased Windows executable path, or
   `exe:<filename>.exe`. The Buttons panel edits these under its Profile

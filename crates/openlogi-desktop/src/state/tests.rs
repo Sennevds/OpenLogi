@@ -29,7 +29,10 @@ use super::bindings::apply_thumbwheel_pair;
 use super::devices::build_device_list;
 use super::scroll::set_scroll_resolution_if_supported;
 use super::smartshift::{smartshift_read_is_current, smartshift_write_outcome};
-use super::{AppState, ConfigPersistence, LightCommandStatus, Load, SmartShiftWriteStatus};
+use super::{
+    AppState, ConfigPersistence, CrownModeOwnership, LightCommandStatus, Load,
+    SmartShiftWriteStatus,
+};
 
 #[test]
 fn read_only_config_rolls_back_mutations_and_does_not_reload_agent() {
@@ -1774,4 +1777,155 @@ fn a_failed_save_keeps_the_forgotten_device() {
             .edit(|config| config.device_identity("2b034").is_some()),
         "the persisted entry must survive the failed save"
     );
+}
+
+#[test]
+fn adding_a_crown_mode_lands_in_the_device_config() {
+    let mut state = state_with_a_known_mouse();
+    state.add_crown_mode("Volume".into());
+    assert_eq!(
+        state
+            .current_crown_modes()
+            .iter()
+            .map(|m| m.name.as_str())
+            .collect::<Vec<_>>(),
+        ["Volume"],
+        "the panel must see the mode it just added"
+    );
+    assert_eq!(state.config.crown_modes(KNOWN_MOUSE_KEY).len(), 1);
+}
+
+/// Mode names in the open profile, which is what these tests are about.
+fn mode_names(state: &AppState) -> Vec<String> {
+    state
+        .current_crown_modes()
+        .iter()
+        .map(|mode| mode.name.clone())
+        .collect()
+}
+
+/// An app profile must not quietly acquire a copy of the device's modes: it
+/// shows them, inherited, until the user asks for its own list.
+#[test]
+fn an_app_profile_inherits_the_default_modes_without_copying_them() {
+    let mut state = state_with_a_known_mouse();
+    state.add_crown_mode("Volume".into());
+    state.set_editing_app(Some("com.apple.Safari".into()));
+
+    assert_eq!(state.crown_mode_ownership(), CrownModeOwnership::Inherited);
+    assert_eq!(
+        mode_names(&state),
+        ["Volume"],
+        "the inherited list is shown, because it is what this app cycles"
+    );
+    assert_eq!(
+        state
+            .config
+            .per_app_crown_modes(KNOWN_MOUSE_KEY, "com.apple.Safari"),
+        None,
+        "opening a profile must write nothing"
+    );
+
+    // Editing an inherited list is refused rather than forking it silently.
+    state.add_crown_mode("Zoom".into());
+    state.remove_crown_mode(0);
+    state.rename_crown_mode(0, "Renamed");
+    assert_eq!(
+        state
+            .config
+            .per_app_crown_modes(KNOWN_MOUSE_KEY, "com.apple.Safari"),
+        None,
+        "no edit may fork the default list into an app profile"
+    );
+    assert_eq!(state.config.crown_modes(KNOWN_MOUSE_KEY).len(), 1);
+}
+
+/// Claiming a list starts it empty — not as a copy of the device's.
+#[test]
+fn giving_an_app_its_own_modes_starts_from_nothing() {
+    let mut state = state_with_a_known_mouse();
+    state.add_crown_mode("Volume".into());
+    state.set_editing_app(Some("com.apple.Safari".into()));
+
+    state.start_app_crown_modes();
+
+    assert_eq!(state.crown_mode_ownership(), CrownModeOwnership::Owned);
+    assert!(mode_names(&state).is_empty(), "an own list starts empty");
+    state.add_crown_mode("Zoom".into());
+    assert_eq!(mode_names(&state), ["Zoom"]);
+    assert_eq!(
+        state.config.crown_modes(KNOWN_MOUSE_KEY).len(),
+        1,
+        "the default profile must be untouched"
+    );
+}
+
+/// The copy is available, just never implicit.
+#[test]
+fn copying_the_default_modes_is_an_explicit_choice() {
+    let mut state = state_with_a_known_mouse();
+    state.add_crown_mode("Volume".into());
+    state.add_crown_mode("Scroll".into());
+    state.set_editing_app(Some("com.apple.Safari".into()));
+
+    state.copy_default_crown_modes();
+
+    assert_eq!(state.crown_mode_ownership(), CrownModeOwnership::Owned);
+    assert_eq!(mode_names(&state), ["Volume", "Scroll"]);
+}
+
+/// The bug this pair of behaviours exists to prevent: deleting an app's last
+/// mode used to drop the override, which brought the whole default list back
+/// and looked like the previous delete had been undone.
+#[test]
+fn deleting_the_last_app_mode_leaves_an_empty_list_not_the_default_one() {
+    let mut state = state_with_a_known_mouse();
+    state.add_crown_mode("Volume".into());
+    state.add_crown_mode("Scroll".into());
+    state.set_editing_app(Some("com.apple.Safari".into()));
+    state.copy_default_crown_modes();
+
+    state.remove_crown_mode(0);
+    assert_eq!(mode_names(&state), ["Scroll"]);
+
+    state.remove_crown_mode(0);
+    assert!(
+        mode_names(&state).is_empty(),
+        "the second delete must empty the list, not restore the default one"
+    );
+    assert_eq!(
+        state.crown_mode_ownership(),
+        CrownModeOwnership::Owned,
+        "an emptied list is still the app's own"
+    );
+}
+
+/// Reverting is its own action, and the only one that restores inheritance.
+#[test]
+fn using_the_default_profiles_modes_drops_the_apps_own_list() {
+    let mut state = state_with_a_known_mouse();
+    state.add_crown_mode("Volume".into());
+    state.set_editing_app(Some("com.apple.Safari".into()));
+    state.start_app_crown_modes();
+    state.add_crown_mode("Zoom".into());
+
+    state.clear_app_crown_modes();
+
+    assert_eq!(state.crown_mode_ownership(), CrownModeOwnership::Inherited);
+    assert_eq!(mode_names(&state), ["Volume"]);
+}
+
+/// Two modes sharing a name are indistinguishable in the mode indicator, so
+/// the generated name skips one that is already taken.
+#[test]
+fn a_generated_mode_name_avoids_one_already_in_the_list() {
+    let mut state = state_with_a_known_mouse();
+    let template = |n: usize| format!("Mode {n}");
+    state.add_crown_mode(state.next_crown_mode_name(template));
+    assert_eq!(mode_names(&state), ["Mode 1"]);
+
+    // The user renames it to what the *next* generated name would be.
+    state.rename_crown_mode(0, "Mode 2");
+    state.add_crown_mode(state.next_crown_mode_name(template));
+    assert_eq!(mode_names(&state), ["Mode 2", "Mode 1"]);
 }

@@ -20,6 +20,7 @@ use tokio::sync::mpsc;
 use tracing::warn;
 
 pub use config::ConfigPersistence;
+pub use crown::CrownModeOwnership;
 pub(crate) use device_key::DeviceKey;
 pub use devices::DeviceRecord;
 pub use light::LightCommandStatus;

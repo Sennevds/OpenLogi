@@ -9,8 +9,9 @@
 //! - its **modes** ([`modes`]), the list a tap cycles through, where each mode
 //!   can retarget rotation and the press without touching those bindings.
 //!
-//! Selecting any row on the left opens the shared action catalog on the right,
-//! mirroring the function-row remapper's select-then-pick model.
+//! Selecting any row on the left opens the matching editor on the right — the
+//! shared action catalog for a control, a name field for a mode — mirroring the
+//! function-row remapper's select-then-pick model.
 //!
 //! Deliberately a list rather than a hardware diagram: the crown has no marker
 //! in Logi's keyboard metadata, and hotspot positions are never synthesized
@@ -29,18 +30,20 @@ use std::rc::Rc;
 // cfg-gated trait import compiles locally and breaks the other CI lanes the
 // moment an ungated element calls one of its methods (see gui.md).
 use gpui::{
-    Context, Entity, IntoElement, ParentElement, Render, Role, StatefulInteractiveElement as _,
-    Styled, Subscription, Window, div, prelude::FluentBuilder as _, px, svg,
+    AppContext as _, Context, Entity, IntoElement, ParentElement, Render, Role,
+    StatefulInteractiveElement as _, Styled, Subscription, Window, div,
+    prelude::FluentBuilder as _, px, svg,
 };
-use gpui_component::{IconName, Selectable as _, h_flex, v_flex};
+use gpui_component::{IconName, Selectable as _, h_flex, input::InputState, v_flex};
 use openlogi_core::binding::{Action, ButtonId, CrownMode, default_binding};
 
 use crate::features::mouse::picker::{
     PickFn, action_icon_path, action_rows, compact_panel, divider, editor_scroll_list,
+    editor_section,
 };
-use crate::state::{AppState, StateEvent};
+use crate::state::{AppState, CrownModeOwnership, StateEvent};
 use crate::ui::action::localized_action_label;
-use crate::ui::components::{MenuRow, control_button};
+use crate::ui::components::{MenuRow, control_button, control_input, localize_placeholder};
 use crate::ui::section::section_label;
 use crate::ui::theme::{self, Palette, Typography as _};
 
@@ -49,12 +52,14 @@ const PANEL_W: f32 = 320.;
 /// Width of the control list beside it.
 const LIST_W: f32 = 260.;
 
-/// What the picker on the right is currently editing.
+/// What the editor on the right is currently open on.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum Target {
     /// One of the dial's own controls, by index into
     /// [`ButtonId::CROWN_CONTROLS`].
     Control(usize),
+    /// The name of the mode at this index.
+    Mode(usize),
     /// One control inside the mode at this index.
     ModeControl(usize, ButtonId),
 }
@@ -68,8 +73,13 @@ struct CrownSlot {
 
 /// The crown-dial panel.
 pub struct CrownPanel {
-    /// What the picker is open on, or `None` when it is closed.
+    /// What the editor is open on, or `None` when it is closed.
     selected: Option<Target>,
+    /// Name field for the mode being renamed, rebuilt when the selection moves
+    /// to a different mode so it always opens on that mode's current name.
+    name_input: Option<Entity<InputState>>,
+    /// Which mode [`Self::name_input`] was built for.
+    name_input_for: Option<usize>,
     _state_obs: Subscription,
 }
 
@@ -90,11 +100,13 @@ impl CrownPanel {
         });
         Self {
             selected: None,
+            name_input: None,
+            name_input_for: None,
             _state_obs: state_obs,
         }
     }
 
-    /// Open the picker on `target`, or close it if it is already open there.
+    /// Open the editor on `target`, or close it if it is already open there.
     fn select(&mut self, target: Target, cx: &mut Context<Self>) {
         self.selected = if self.selected == Some(target) {
             None
@@ -200,10 +212,71 @@ impl CrownPanel {
             )
         })
     }
+
+    /// The name field for one mode.
+    ///
+    /// Inline rather than a dialog: the mode list is edited in bursts — add,
+    /// name, bind, add another — and a modal per rename would interrupt every
+    /// one of them.
+    fn name_editor(
+        &mut self,
+        index: usize,
+        current: &str,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) -> gpui::Div {
+        let pal = theme::palette(cx);
+        let input = self.name_field(index, current, window, cx);
+        let for_commit = input.clone();
+        compact_panel(pal)
+            .w(px(PANEL_W))
+            .child(editor_section(tr!("Mode name"), pal))
+            .child(
+                v_flex().p_2().gap_2().child(control_input(&input)).child(
+                    control_button("crown-mode-name-save")
+                        .w_full()
+                        .label(tr!("Save"))
+                        .on_click(move |_event, _window, cx| {
+                            let name = for_commit.read(cx).value().to_string();
+                            AppState::update_bindings(cx, |state| {
+                                state.rename_crown_mode(index, &name);
+                            });
+                        }),
+                ),
+            )
+    }
+
+    /// The [`InputState`] for `index`, rebuilt when the selection moves so a
+    /// reopened field never shows the previous mode's name.
+    fn name_field(
+        &mut self,
+        index: usize,
+        current: &str,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) -> Entity<InputState> {
+        if self.name_input_for != Some(index) {
+            self.name_input = None;
+            self.name_input_for = Some(index);
+        }
+        let initial = current.to_string();
+        let input = self
+            .name_input
+            .get_or_insert_with(|| {
+                cx.new(|cx| {
+                    let mut state = InputState::new(window, cx);
+                    state.set_value(initial, window, cx);
+                    state
+                })
+            })
+            .clone();
+        localize_placeholder(&input, tr!("Volume, Zoom, Tabs…"), window, cx);
+        input
+    }
 }
 
 impl Render for CrownPanel {
-    fn render(&mut self, _window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+    fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         let pal = theme::palette(cx);
         let bindings = AppState::try_read(cx).map(AppState::button_bindings);
         let slots: Vec<CrownSlot> = ButtonId::CROWN_CONTROLS
@@ -231,24 +304,33 @@ impl Render for CrownPanel {
             .as_ref()
             .map(|state| state.current_crown_modes())
             .unwrap_or_default();
-        let modes_overridden = state.is_some_and(AppState::crown_modes_are_overridden);
-        // A removed mode leaves the picker open on an index that no longer
+        let ownership = state.as_ref().map_or(CrownModeOwnership::Owned, |state| {
+            state.crown_mode_ownership()
+        });
+        let in_app_profile = state
+            .as_ref()
+            .is_some_and(|state| state.editing_app().is_some());
+        // A removed mode leaves the editor open on an index that no longer
         // exists; drop the selection rather than render against a stale row.
         let selected = self.selected.filter(|target| match *target {
             Target::Control(idx) => idx < slots.len(),
-            Target::ModeControl(idx, _) => idx < modes.len(),
+            Target::Mode(idx) | Target::ModeControl(idx, _) => idx < modes.len(),
         });
         self.selected = selected;
 
         let view = cx.entity();
-        let picker = selected.and_then(|target| match target {
-            Target::Control(idx) => slots
+        let editor = match selected {
+            Some(Target::Control(idx)) => slots
                 .get(idx)
                 .map(|slot| Self::control_picker(slot, &view, cx)),
-            Target::ModeControl(idx, control) => modes
+            Some(Target::Mode(idx)) => modes
+                .get(idx)
+                .map(|mode| self.name_editor(idx, &mode.name.clone(), window, cx)),
+            Some(Target::ModeControl(idx, control)) => modes
                 .get(idx)
                 .map(|mode| Self::mode_picker(idx, control, mode, &view, cx)),
-        });
+            None => None,
+        };
 
         v_flex()
             .gap_3()
@@ -270,20 +352,23 @@ impl Render for CrownPanel {
                             .w(px(LIST_W))
                             .child(control_list(&slots, selected, &view, pal))
                             .child(modes::modes_section(
-                                &modes,
-                                cycles_modes,
-                                modes_overridden,
-                                selected,
+                                &modes::ModesView {
+                                    modes: &modes,
+                                    ownership,
+                                    in_app_profile,
+                                    cycles_modes,
+                                    selected,
+                                },
                                 &view,
                                 pal,
                             )),
                     )
-                    .children(picker),
+                    .children(editor),
             )
     }
 }
 
-/// The picker card shell shared by both kinds of target.
+/// The picker card shell shared by both action-catalog targets.
 fn picker_card(
     caption: impl Into<gpui::SharedString>,
     rows: Vec<gpui::Div>,

@@ -506,8 +506,34 @@ fn a_windows_exe_key_matches_a_foreground_path() {
     );
 }
 
-/// Storing an empty list would mean "this app has no modes", which is not a
-/// thing the editor can express — clearing an override restores the default.
+/// An app that owns an *empty* list has a dial that cycles nothing — a
+/// different statement from "this app uses the device's list". The distinction
+/// is what stops deleting an app's last mode from resurrecting the default one.
+#[test]
+fn an_app_can_own_an_empty_mode_list() {
+    let mut cfg = Config::default();
+    cfg.set_crown_modes("2b034", vec![mode("Volume", Action::VolumeUp)]);
+    cfg.set_per_app_crown_modes("2b034", "com.apple.Safari", Vec::new());
+
+    let restored = write_and_read(&cfg);
+    assert_eq!(
+        restored.per_app_crown_modes("2b034", "com.apple.Safari"),
+        Some(&Vec::new()),
+        "an owned-but-empty list must survive a save and reload"
+    );
+    assert!(
+        restored
+            .effective_crown_modes("2b034", Some("com.apple.Safari"))
+            .is_empty(),
+        "the app cycles nothing rather than inheriting the device's list"
+    );
+    assert!(
+        restored.has_app_override("2b034", "com.apple.Safari"),
+        "a deliberately empty dial is still an override"
+    );
+}
+
+/// Only an explicit clear hands the app back to the device's list.
 #[test]
 fn clearing_a_per_app_list_restores_the_default_and_leaves_no_trace() {
     let mut cfg = Config::default();
@@ -517,7 +543,7 @@ fn clearing_a_per_app_list_restores_the_default_and_leaves_no_trace() {
         "com.apple.Safari",
         vec![mode("Zoom", Action::ScrollUp)],
     );
-    cfg.set_per_app_crown_modes("2b034", "com.apple.Safari", Vec::new());
+    cfg.clear_per_app_crown_modes("2b034", "com.apple.Safari");
 
     assert_eq!(cfg.per_app_crown_modes("2b034", "com.apple.Safari"), None);
     assert_eq!(
