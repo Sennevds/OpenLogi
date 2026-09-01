@@ -24,7 +24,7 @@ use self::button::{
 pub(crate) use self::button::{HidppSessionId, PressToken};
 use crate::hardware::{toggle_smartshift_in_background, write_dpi_in_background};
 use crate::receiver_access::ReceiverAccess;
-use crate::{CrownModeState, CrownModes, DpiCycleState, DpiCycles};
+use crate::{CrownModeIndicator, CrownModeState, CrownModes, DpiCycleState, DpiCycles};
 
 /// Output transition when an action starts within one physical press.
 #[derive(Debug, PartialEq, Eq)]
@@ -72,6 +72,10 @@ struct ActionExecutor {
     registry: ChannelRegistry,
     receiver_access: ReceiverAccess,
     action_ring: tokio::sync::mpsc::UnboundedSender<Option<String>>,
+    /// Announces a mode change for whatever presents it on this platform.
+    /// Send failures are ignored the way the ring's are: an agent with no
+    /// presenter still cycles modes, it just does so silently.
+    mode_indicator: tokio::sync::mpsc::UnboundedSender<CrownModeIndicator>,
 }
 
 impl ActionExecutor {
@@ -106,6 +110,12 @@ impl ActionExecutor {
                             .map(|mode| mode.name.clone());
                         if let Some(name) = cycled {
                             info!(mode = %name, "crown mode cycled");
+                            if let Some(indicator) = guard
+                                .state_for(device_key)
+                                .and_then(|state| state.indicator())
+                            {
+                                let _ = self.mode_indicator.send(indicator);
+                            }
                         } else {
                             debug!("crown mode cycle: no usable modes");
                         }
@@ -253,6 +263,7 @@ impl ActionRuntime {
         registry: ChannelRegistry,
         receiver_access: ReceiverAccess,
         action_ring: tokio::sync::mpsc::UnboundedSender<Option<String>>,
+        mode_indicator: tokio::sync::mpsc::UnboundedSender<CrownModeIndicator>,
     ) -> io::Result<Self> {
         let executor = ActionExecutor {
             dpi_cycle,
@@ -261,6 +272,7 @@ impl ActionRuntime {
             registry,
             receiver_access,
             action_ring,
+            mode_indicator,
         };
         let mut button_handler = ButtonEventHandler::new(executor.clone());
         let buttons = ButtonRuntimeOwner::spawn(move |event| button_handler.handle(event))?;

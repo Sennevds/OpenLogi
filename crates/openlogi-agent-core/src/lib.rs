@@ -22,5 +22,5 @@ pub mod receiver_access;
 pub mod runtime;
 pub mod watchers;
 
-pub use crown_mode::{CrownModeState, CrownModes};
+pub use crown_mode::{CrownModeIndicator, CrownModeState, CrownModes};
 pub use dpi::{DpiCycleState, DpiCycles};

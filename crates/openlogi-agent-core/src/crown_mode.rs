@@ -64,6 +64,20 @@ impl CrownModes {
     }
 }
 
+/// What an on-screen indicator needs to draw the mode list: every mode's name
+/// in cycle order, and which one is active.
+///
+/// Deliberately plain data with no platform types: the agent-core half decides
+/// *that* the indicator should update, and each platform's own presenter
+/// decides how (or whether) to draw it.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct CrownModeIndicator {
+    /// Mode names in cycle order.
+    pub names: Vec<String>,
+    /// Index into [`Self::names`] of the active mode.
+    pub selected: usize,
+}
+
 /// One device's mode list plus where in it the dial currently sits.
 #[derive(Debug, Clone, Default)]
 pub struct CrownModeState {
@@ -108,6 +122,19 @@ impl CrownModeState {
     #[must_use]
     pub fn action_for(&self, control: ButtonId) -> Option<&Action> {
         self.active()?.action_for(control)
+    }
+
+    /// Snapshot for an on-screen indicator. `None` when there is nothing worth
+    /// showing, so a presenter never has to decide that for itself.
+    #[must_use]
+    pub fn indicator(&self) -> Option<CrownModeIndicator> {
+        if self.modes.is_empty() {
+            return None;
+        }
+        Some(CrownModeIndicator {
+            names: self.modes.iter().map(|mode| mode.name.clone()).collect(),
+            selected: self.index,
+        })
     }
 }
 
@@ -176,6 +203,25 @@ mod tests {
         );
         assert_eq!(state.action_for(ButtonId::CrownRotateDown), None);
         assert_eq!(state.action_for(ButtonId::CrownTap), None);
+    }
+
+    #[test]
+    fn the_indicator_lists_every_mode_and_marks_the_active_one() {
+        let mut state = CrownModeState::new(vec![
+            mode("Volume", Action::VolumeUp),
+            mode("Scroll", Action::ScrollUp),
+        ]);
+        state.cycle();
+        let hud = state
+            .indicator()
+            .expect("a non-empty list has an indicator");
+        assert_eq!(hud.names, vec!["Volume".to_string(), "Scroll".to_string()]);
+        assert_eq!(hud.selected, 1);
+    }
+
+    #[test]
+    fn an_empty_list_has_no_indicator() {
+        assert!(CrownModeState::new(Vec::new()).indicator().is_none());
     }
 
     #[test]

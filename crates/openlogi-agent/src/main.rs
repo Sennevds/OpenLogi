@@ -18,6 +18,9 @@
 mod binary_watch;
 mod launch_agent;
 mod logging;
+mod osd;
+#[cfg(target_os = "windows")]
+mod osd_windows;
 mod overlay;
 mod pairing;
 #[cfg(target_os = "windows")]
@@ -38,6 +41,7 @@ use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::Duration;
 
+use openlogi_agent_core::CrownModeIndicator;
 use openlogi_agent_core::action_ring::ActionRingManager;
 use openlogi_agent_core::event_monitor::EventMonitor;
 use openlogi_agent_core::observable::ObservableState;
@@ -168,6 +172,9 @@ fn spawn_hidpp_watchers(shared: &SharedRuntime, inputs: &InputServices) {
 struct InputServices {
     ring: Arc<ActionRingManager>,
     triggers: tokio::sync::mpsc::UnboundedReceiver<Option<String>>,
+    /// Mode changes awaiting presentation. Consumed on every platform so the
+    /// channel cannot fill; only Windows currently draws them.
+    mode_changes: tokio::sync::mpsc::UnboundedReceiver<CrownModeIndicator>,
     dispatcher: ActionDispatcher,
     action_runtime: ActionRuntime,
     scroll_input: ScrollInputHandle,
@@ -178,6 +185,7 @@ impl InputServices {
     fn start(shared: &SharedRuntime) -> Option<Self> {
         let ring = Arc::new(ActionRingManager::default());
         let (sender, triggers) = tokio::sync::mpsc::unbounded_channel();
+        let (mode_sender, mode_changes) = tokio::sync::mpsc::unbounded_channel();
         let action_runtime = match ActionRuntime::new(
             shared.dpi_cycle.clone(),
             shared.crown_modes.clone(),
@@ -185,6 +193,7 @@ impl InputServices {
             shared.channel_registry.clone(),
             shared.receiver_access.clone(),
             sender,
+            mode_sender,
         ) {
             Ok(runtime) => runtime,
             Err(e) => {
@@ -204,6 +213,7 @@ impl InputServices {
         Some(Self {
             ring,
             triggers,
+            mode_changes,
             dispatcher,
             action_runtime,
             scroll_input,
@@ -451,21 +461,64 @@ async fn apply_foreground_update(
     }
 }
 
+/// The polling watchers' receivers, named rather than a five-wide tuple.
+struct Polls {
+    inventory: tokio::sync::mpsc::UnboundedReceiver<watchers::inventory::InventoryEvent>,
+    camera: tokio::sync::mpsc::UnboundedReceiver<bool>,
+    app: tokio::sync::mpsc::UnboundedReceiver<watchers::foreground_app::ForegroundUpdate>,
+    accessibility: tokio::sync::mpsc::UnboundedReceiver<bool>,
+    input_monitoring: tokio::sync::mpsc::UnboundedReceiver<bool>,
+}
+
+/// Start every periodic watcher. Their intervals differ by how fast the thing
+/// they poll can change and how expensive the poll is; the inventory's is the
+/// slowest because enumeration touches hardware.
+fn start_polling_watchers(shared: &SharedRuntime) -> Polls {
+    Polls {
+        inventory: watchers::inventory::spawn_with_registry(
+            Duration::from_secs(2),
+            shared.channel_registry.clone(),
+        ),
+        camera: watchers::camera::spawn(Duration::from_secs(1)),
+        app: watchers::foreground_app::spawn(Duration::from_secs(1)),
+        accessibility: watchers::accessibility::spawn(Duration::from_millis(1200)),
+        input_monitoring: watchers::input_monitoring::spawn(Duration::from_millis(1200)),
+    }
+}
+
+/// The live event monitor, plus the janitor that turns it back off.
+///
+/// Shared between the hook callback (which mirrors events into it) and the IPC
+/// server (which the GUI polls); the janitor stops it once the GUI stops
+/// polling, so an unwatched monitor costs nothing.
+fn start_event_monitor() -> Arc<EventMonitor> {
+    let event_monitor = Arc::new(EventMonitor::default());
+    tokio::spawn(Arc::clone(&event_monitor).run_idle_janitor());
+    event_monitor
+}
+
+/// Apply the settings that are only read at startup and prompt for any
+/// missing permission, before `config` moves into the orchestrator. Returns
+/// the hook kill-switch.
+///
+/// `capture_mouse_events` and `show_in_menu_bar` are startup-only on purpose
+/// (flipping either needs an agent restart, which the config docs state), so
+/// they are read here rather than on every config reload.
+fn apply_startup_settings(config: &Config) -> bool {
+    // Reconcile the agent's launch-at-login autostart and clear the legacy GUI
+    // LaunchAgent.
+    launch_agent::reconcile(config.app_settings.launch_at_login);
+    let capture_mouse_events = config.app_settings.capture_mouse_events;
+    prompt_missing_accessibility(capture_mouse_events);
+    capture_mouse_events
+}
+
 async fn run(
     config: Config,
     #[cfg(any(target_os = "macos", target_os = "windows"))] resume_pending: Arc<AtomicBool>,
     mut uninstalled: tokio::sync::mpsc::UnboundedReceiver<()>,
 ) {
-    // Reconcile the agent's launch-at-login autostart and clear the legacy GUI
-    // LaunchAgent, before `config` moves into the orchestrator.
-    launch_agent::reconcile(config.app_settings.launch_at_login);
-
-    // Read the hook kill-switch before `config` moves into the orchestrator.
-    // Startup-only on purpose (like `show_in_menu_bar`): flipping it requires
-    // an agent restart, which the config docs state.
-    let capture_mouse_events = config.app_settings.capture_mouse_events;
-
-    prompt_missing_accessibility(capture_mouse_events);
+    let capture_mouse_events = apply_startup_settings(&config);
     #[cfg(target_os = "macos")]
     request_input_monitoring().await;
 
@@ -485,11 +538,7 @@ async fn run(
         return;
     };
 
-    // Live event monitor: shared between the hook callback (which mirrors events
-    // into it) and the IPC server (which the GUI polls). The janitor turns it
-    // back off once the GUI stops polling.
-    let event_monitor = Arc::new(EventMonitor::default());
-    tokio::spawn(Arc::clone(&event_monitor).run_idle_janitor());
+    let event_monitor = start_event_monitor();
 
     // Pairing runs in the agent (it owns device I/O); the GUI drives it over IPC.
     let pairing = Arc::new(pairing::PairingManager::new(
@@ -500,20 +549,21 @@ async fn run(
     // HID++ watchers need no Accessibility permission — start them up front.
     spawn_hidpp_watchers(&shared, &inputs);
 
-    let mut inventory_rx = watchers::inventory::spawn_with_registry(
-        Duration::from_secs(2),
-        shared.channel_registry.clone(),
-    );
-    let mut camera_rx = watchers::camera::spawn(Duration::from_secs(1));
-    let mut app_rx = watchers::foreground_app::spawn(Duration::from_secs(1));
-    let mut accessibility_rx = watchers::accessibility::spawn(Duration::from_millis(1200));
-    let mut input_monitoring_rx = watchers::input_monitoring::spawn(Duration::from_millis(1200));
+    let Polls {
+        inventory: mut inventory_rx,
+        camera: mut camera_rx,
+        app: mut app_rx,
+        accessibility: mut accessibility_rx,
+        input_monitoring: mut input_monitoring_rx,
+    } = start_polling_watchers(&shared);
 
     let (mut sigterm, mut sigint) = shutdown_signals();
 
     // IPC server: the GUI connects here for device state + "apply now" commands.
     // The endpoint (Unix socket / Windows named pipe) is resolved inside
     // `transport::bind`, called by `server::run`.
+    let crown_osd = osd::spawn();
+
     let ring_haptics = spawn_ipc_server(
         Arc::clone(&orchestrator),
         &shared,
@@ -564,6 +614,7 @@ async fn run(
             Some(device_key) = inputs.triggers.recv() => {
                 begin_action_ring(&orchestrator, &inputs.ring, &ring_haptics, device_key.as_deref()).await;
             }
+            Some(indicator) = inputs.mode_changes.recv() => crown_osd.show(&indicator),
             Some(granted) = accessibility_rx.recv() => {
                 observable.set_accessibility_granted(granted);
                 if !granted {
