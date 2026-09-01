@@ -23,8 +23,8 @@ use hidpp::{
     feature::{
         CreatableFeature, EmittingFeature,
         crown::{
-            ButtonState, CrownEvent, CrownFeature, CrownGesture, CrownUpdate, RatchetMode,
-            ReportingMode, SetCrownMode,
+            ActivityState, ButtonState, CrownEvent, CrownFeature, CrownGesture, CrownUpdate,
+            RatchetMode, ReportingMode, SetCrownMode,
         },
     },
 };
@@ -202,6 +202,35 @@ struct CrownSample {
     button: ButtonState,
     /// Whether this event reports a deliberate single tap.
     tap: bool,
+    /// The finger-contact phase, which brackets one touch of the dial.
+    touch: TouchPhase,
+}
+
+/// One contact's lifecycle, from the crown's touch sensor.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+enum TouchPhase {
+    /// No finger, or this crown has no touch sensor.
+    #[default]
+    Idle,
+    /// A finger just arrived.
+    Start,
+    /// A finger is still on the dial.
+    Active,
+    /// The finger just left.
+    Stop,
+}
+
+impl From<ActivityState> for TouchPhase {
+    fn from(state: ActivityState) -> Self {
+        match state {
+            ActivityState::Start => Self::Start,
+            ActivityState::Active => Self::Active,
+            ActivityState::Stop => Self::Stop,
+            // `Inactive` and any value outside the spec mean "no contact to
+            // track"; guessing otherwise would strand a contact open.
+            _ => Self::Idle,
+        }
+    }
 }
 
 impl From<&CrownUpdate> for CrownSample {
@@ -211,6 +240,7 @@ impl From<&CrownUpdate> for CrownSample {
             slots: u.relative_slot_rotation,
             button: u.button,
             tap: u.gesture == CrownGesture::Tap,
+            touch: TouchPhase::from(u.touch),
         }
     }
 }
@@ -229,6 +259,23 @@ pub(super) struct CrownTranslator {
     residue: i32,
     /// Whether the crown's button is currently held, to emit balanced edges.
     pressed: bool,
+    /// The finger contact in progress, if the crown reports touch phases.
+    contact: Option<Contact>,
+}
+
+/// One finger contact, from touch-start to touch-stop.
+///
+/// A tap is only a tap if *nothing else* happened while the finger was down,
+/// which is what this accumulates. Bracketing the whole contact — rather than
+/// judging each packet — is what makes a press-then-release, or a turn, or a
+/// finger resting, reliably not-a-tap: the disqualification survives until the
+/// finger actually leaves.
+#[derive(Debug, Clone, Copy, Default)]
+struct Contact {
+    /// The firmware called this contact a tap at some point during it.
+    tap_seen: bool,
+    /// Something happened that a tap excludes: rotation, or a button press.
+    disqualified: bool,
 }
 
 impl CrownTranslator {
@@ -237,6 +284,7 @@ impl CrownTranslator {
             slots_per_detent,
             residue: 0,
             pressed: false,
+            contact: None,
         }
     }
 
@@ -254,9 +302,15 @@ impl CrownTranslator {
     fn sample(&mut self, sample: CrownSample) -> Vec<CapturedInput> {
         let mut out = Vec::new();
         // Whether the button is involved in this event, captured before the
-        // press edges below mutate `pressed`. See the tap suppression at the
-        // end of this function.
+        // press edges below mutate `pressed`. See the tap decision at the end
+        // of this function.
         let button_involved = self.pressed || !matches!(sample.button, ButtonState::Inactive);
+
+        // Open a contact the moment the finger lands, so everything below can
+        // disqualify it.
+        if sample.touch == TouchPhase::Start {
+            self.contact = Some(Contact::default());
+        }
 
         let steps = self.rotation_steps(sample);
         let direction = if steps > 0 {
@@ -283,12 +337,28 @@ impl CrownTranslator {
             _ => {}
         }
 
-        // A tap reported while the button is involved is the press's own finger
-        // contact, not a deliberate touch tap: pressing the crown necessarily
-        // touches the capacitive sensor above it, and the firmware puts the
-        // gesture and the button state in one packet. Emitting both made a
-        // single press run the press action *and* the tap action.
-        if sample.tap && !button_involved {
+        // The tap decision. A tap is the *absence* of everything else during
+        // one finger contact: pressing the crown necessarily touches the
+        // capacitive sensor above it, and turning it does too, so the firmware
+        // reports its tap gesture alongside both. Judging the whole contact
+        // rather than the packet is what makes a press, a turn, or a resting
+        // finger reliably not-a-tap — including when the gesture arrives a
+        // packet after the press has already gone idle.
+        if let Some(contact) = self.contact.as_mut() {
+            contact.tap_seen |= sample.tap;
+            contact.disqualified |= button_involved || steps != 0;
+            // Only the finger leaving settles it.
+            if sample.touch == TouchPhase::Stop {
+                let tapped = contact.tap_seen && !contact.disqualified;
+                self.contact = None;
+                if tapped {
+                    out.push(CapturedInput::ButtonPulse(ButtonId::CrownTap));
+                }
+            }
+        } else if sample.tap && !button_involved {
+            // No contact to bracket: either this crown has no touch sensor, or
+            // the gesture arrived without one. Fall back to the per-packet
+            // rule so a tap still works rather than being lost entirely.
             out.push(CapturedInput::ButtonPulse(ButtonId::CrownTap));
         }
 
@@ -320,14 +390,34 @@ impl CrownTranslator {
 mod tests {
     use super::*;
 
-    /// An idle packet: no rotation, no press, no gesture.
+    /// An idle packet: no rotation, no press, no gesture, no contact.
     fn idle() -> CrownSample {
         CrownSample {
             ratchets: 0,
             slots: 0,
             button: ButtonState::Inactive,
             tap: false,
+            touch: TouchPhase::Idle,
         }
+    }
+
+    /// One deliberate tap as the Craft reports it: the finger lands, the
+    /// firmware calls it a tap, the finger leaves.
+    fn tap_contact(t: &mut CrownTranslator) -> Vec<CapturedInput> {
+        let mut out = t.sample(CrownSample {
+            touch: TouchPhase::Start,
+            ..idle()
+        });
+        out.extend(t.sample(CrownSample {
+            touch: TouchPhase::Active,
+            tap: true,
+            ..idle()
+        }));
+        out.extend(t.sample(CrownSample {
+            touch: TouchPhase::Stop,
+            ..idle()
+        }));
+        out
     }
 
     #[test]
@@ -513,6 +603,177 @@ mod tests {
         // `CrownGesture::DoubleTap` converts to `tap: false` — the firmware
         // reports it alongside the tap that began it.
         assert!(t.sample(idle()).is_empty());
+    }
+
+    /// The grammar the whole contact rule exists for: a brief touch with
+    /// nothing else in it is a tap.
+    #[test]
+    fn a_bare_contact_the_firmware_calls_a_tap_pulses_once() {
+        let mut t = CrownTranslator::new(8);
+        assert_eq!(
+            tap_contact(&mut t),
+            vec![CapturedInput::ButtonPulse(ButtonId::CrownTap)]
+        );
+    }
+
+    /// Turning while touching is a turn, not a tap — even though the firmware
+    /// reports its tap gesture during the same contact.
+    #[test]
+    fn a_contact_that_rotates_is_not_a_tap() {
+        let mut t = CrownTranslator::new(8);
+        t.sample(CrownSample {
+            touch: TouchPhase::Start,
+            ..idle()
+        });
+        let turned = t.sample(CrownSample {
+            touch: TouchPhase::Active,
+            ratchets: 1,
+            tap: true,
+            ..idle()
+        });
+        assert_eq!(
+            turned,
+            vec![CapturedInput::ButtonPulse(ButtonId::CrownRotateUp)],
+            "the rotation dispatches, the tap does not"
+        );
+        assert!(
+            t.sample(CrownSample {
+                touch: TouchPhase::Stop,
+                ..idle()
+            })
+            .is_empty(),
+            "lifting off after a turn must not fire the tap"
+        );
+    }
+
+    /// Pushing while touching is a press, not a tap.
+    #[test]
+    fn a_contact_that_presses_is_not_a_tap() {
+        let mut t = CrownTranslator::new(8);
+        t.sample(CrownSample {
+            touch: TouchPhase::Start,
+            ..idle()
+        });
+        t.sample(CrownSample {
+            touch: TouchPhase::Active,
+            button: ButtonState::Press,
+            tap: true,
+            ..idle()
+        });
+        let released = t.sample(CrownSample {
+            touch: TouchPhase::Active,
+            button: ButtonState::Release,
+            ..idle()
+        });
+        assert_eq!(
+            released,
+            vec![CapturedInput::ButtonUp(ButtonId::CrownPress)]
+        );
+        assert!(
+            t.sample(CrownSample {
+                touch: TouchPhase::Stop,
+                ..idle()
+            })
+            .is_empty(),
+            "the press already happened; lifting off is not also a tap"
+        );
+    }
+
+    /// The case the per-packet rule could not catch: the gesture arriving
+    /// after the button has gone idle, while the finger is still down.
+    #[test]
+    fn a_tap_reported_after_a_press_within_one_contact_is_still_suppressed() {
+        let mut t = CrownTranslator::new(8);
+        t.sample(CrownSample {
+            touch: TouchPhase::Start,
+            button: ButtonState::Press,
+            ..idle()
+        });
+        t.sample(CrownSample {
+            touch: TouchPhase::Active,
+            button: ButtonState::Release,
+            ..idle()
+        });
+        // Button idle now, but the finger has not left.
+        t.sample(CrownSample {
+            touch: TouchPhase::Active,
+            tap: true,
+            ..idle()
+        });
+        assert!(
+            t.sample(CrownSample {
+                touch: TouchPhase::Stop,
+                ..idle()
+            })
+            .is_empty(),
+            "one contact, one verdict — the press disqualified it"
+        );
+    }
+
+    /// A finger resting on the dial is not a tap, however long it rests.
+    #[test]
+    fn a_contact_the_firmware_never_calls_a_tap_pulses_nothing() {
+        let mut t = CrownTranslator::new(8);
+        t.sample(CrownSample {
+            touch: TouchPhase::Start,
+            ..idle()
+        });
+        for _ in 0..20 {
+            assert!(
+                t.sample(CrownSample {
+                    touch: TouchPhase::Active,
+                    ..idle()
+                })
+                .is_empty()
+            );
+        }
+        assert!(
+            t.sample(CrownSample {
+                touch: TouchPhase::Stop,
+                ..idle()
+            })
+            .is_empty()
+        );
+    }
+
+    /// Consecutive taps each stand alone: a disqualified contact must not
+    /// poison the next one.
+    #[test]
+    fn a_disqualified_contact_does_not_poison_the_next_tap() {
+        let mut t = CrownTranslator::new(8);
+        t.sample(CrownSample {
+            touch: TouchPhase::Start,
+            ..idle()
+        });
+        t.sample(CrownSample {
+            touch: TouchPhase::Active,
+            ratchets: 1,
+            tap: true,
+            ..idle()
+        });
+        t.sample(CrownSample {
+            touch: TouchPhase::Stop,
+            ..idle()
+        });
+        assert_eq!(
+            tap_contact(&mut t),
+            vec![CapturedInput::ButtonPulse(ButtonId::CrownTap)],
+            "the next clean contact taps"
+        );
+    }
+
+    /// A crown with no touch sensor reports no phases; the tap must still
+    /// work rather than being lost with the contact that never opens.
+    #[test]
+    fn a_crown_without_touch_phases_falls_back_to_the_packet_rule() {
+        let mut t = CrownTranslator::new(8);
+        assert_eq!(
+            t.sample(CrownSample {
+                tap: true,
+                ..idle()
+            }),
+            vec![CapturedInput::ButtonPulse(ButtonId::CrownTap)]
+        );
     }
 
     /// Pressing the crown touches its capacitive sensor, so the firmware

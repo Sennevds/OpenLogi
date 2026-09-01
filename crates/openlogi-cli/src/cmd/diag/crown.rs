@@ -31,9 +31,21 @@ fn print_state(state: CrownState) {
         state.slots_per_revolution, state.ratchets_per_revolution
     );
     println!(
-        "  controls: button={} tap={}",
+        "  controls: button={} long-press={} tap={} double-tap={} touch={} proximity={}",
         yes_no(state.has_button),
-        yes_no(state.has_tap)
+        yes_no(state.has_long_press),
+        yes_no(state.has_tap),
+        yes_no(state.has_double_tap),
+        yes_no(state.has_touch),
+        yes_no(state.has_proximity)
+    );
+    println!(
+        "  timings: rotation={}ms short/long={}ms double-tap={}ms (configurable: short/long={} double-tap={})",
+        u32::from(state.rotation_timeout) * 10,
+        u32::from(state.short_long_timeout) * 10,
+        u32::from(state.double_tap_speed) * 10,
+        yes_no(state.short_long_configurable),
+        yes_no(state.double_tap_configurable)
     );
     // Who owns the dial right now. `diverted` means some host software (this
     // agent, or Logi Options+) is translating rotation itself, so the crown's

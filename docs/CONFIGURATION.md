@@ -70,8 +70,9 @@ Common device fields are:
   Craft keyboard's crown dial, editable in the GUI's Crown tab. They stay
   native until bound: diverting the crown takes over its firmware volume
   function, so it is only diverted while one of the four carries a real action
-  or the device has a `crown_modes` list. `CrownTap` is a touch tap with no press, reported
-  from incidental finger contact while turning as well as from a deliberate
+  or the device has a `crown_modes` list. `CrownTap` is a touch tap with no
+  press: it fires only for a finger contact in which *nothing else* happened,
+  so pressing the dial, turning it, or resting a finger on it is never also a
   tap. Rotation dispatches one action per detent, capped per report so a fast
   flick cannot fire an unbounded burst
 - `crown_modes`: an ordered list of what the crown dial does, cycled by the
