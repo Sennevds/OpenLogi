@@ -59,6 +59,7 @@ mod agent;
 mod bindings;
 mod camera;
 mod config;
+mod crown;
 mod device_key;
 mod device_runtime;
 mod device_store;

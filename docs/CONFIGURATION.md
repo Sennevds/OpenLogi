@@ -83,7 +83,18 @@ Common device fields are:
   otherwise a mode could strand you with no way to cycle out. Modes are
   skipped while they set nothing, the active mode is agent state that is not
   persisted (every device starts on its first mode), and a non-empty list is
-  enough to divert the crown on its own. No GUI editor yet: hand-edit this
+  enough to divert the crown on its own. The GUI's Crown tab edits the list
+  under the same Profile selector the Buttons panel uses
+- `per_app_crown_modes`: complete `crown_modes` lists keyed the same way as
+  `per_app_bindings`, `exe:` fallback included. An application listed here
+  cycles *its own* list instead of the device's — replaced wholesale, never
+  merged, because the list is a cycle order and overlaying entries onto it by
+  position would silently change what a tap reaches next. Apps that share the
+  default list hand the dial over in whatever mode it was left in; entering an
+  app with its own list starts that list at its first mode, since the old
+  position pointed into a list this app never cycled. Removing an app's last
+  mode drops the override, so the app inherits the default list again — an
+  empty override and "inherit" are the same thing in the file
 - `per_app_bindings`: sparse action overlays keyed by macOS bundle id, Linux
   application id, exact lower-cased Windows executable path, or
   `exe:<filename>.exe`. The Buttons panel edits these under its Profile

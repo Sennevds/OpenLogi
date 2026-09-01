@@ -6,7 +6,10 @@
 //! as `"receiver:abc123:slot:2"`. Schema migrations branch on
 //! [`Config::schema_version`].
 
-use std::{collections::BTreeMap, path::Path};
+use std::{
+    collections::{BTreeMap, BTreeSet},
+    path::Path,
+};
 
 use serde::{Deserialize, Serialize};
 
@@ -595,11 +598,26 @@ impl Config {
     }
 
     /// Every application key `device_key` has a profile for, in key order.
+    ///
+    /// A profile is anything the user authored for that app, so this unions the
+    /// button overrides with the per-app crown-mode lists: a profile that only
+    /// retargets the dial is still a profile, and omitting it here would leave
+    /// it unreachable from the editor that created it.
     pub fn app_profiles(&self, device_key: &str) -> impl Iterator<Item = &str> {
         self.devices
             .get(device_key)
             .into_iter()
-            .flat_map(|device| device.per_app_bindings.keys().map(String::as_str))
+            .flat_map(|device| {
+                device
+                    .per_app_bindings
+                    .keys()
+                    .chain(device.per_app_crown_modes.keys())
+                    .map(String::as_str)
+            })
+            // Both maps are key-ordered, so deduping a merged run needs a set
+            // rather than neighbour comparison.
+            .collect::<BTreeSet<_>>()
+            .into_iter()
     }
 
     /// Drop `device_key`'s whole profile for `app`. Nothing happens when there
@@ -607,6 +625,11 @@ impl Config {
     pub fn remove_app_profile(&mut self, device_key: &str, app: &str) {
         if let Some(device) = self.devices.get_mut(device_key) {
             device.per_app_bindings.remove(app);
+            // A profile is one user-visible thing. Leaving the crown-mode list
+            // behind would resurrect a "deleted" profile the moment that app
+            // came to the front again — with the dial overridden and no button
+            // override left to explain why.
+            device.per_app_crown_modes.remove(app);
         }
     }
 
@@ -637,6 +660,54 @@ impl Config {
             .entry(device_key.to_string())
             .or_default()
             .crown_modes = modes;
+    }
+
+    /// The crown modes in force for `device_key` while `app` is in front, in
+    /// cycle order.
+    ///
+    /// An application with its own list cycles that list *instead of* the
+    /// device's default one — never merged into it (see
+    /// [`DeviceConfig::per_app_crown_modes`]). Resolution goes through the same
+    /// matcher as the per-app binding overlays, so a Windows `exe:` key matches
+    /// a foreground executable path the way a button override does.
+    #[must_use]
+    pub fn effective_crown_modes(&self, device_key: &str, app: Option<&str>) -> Vec<CrownMode> {
+        let Some(device) = self.devices.get(device_key) else {
+            return Vec::new();
+        };
+        app.and_then(|app| app_overlay(&device.per_app_crown_modes, app))
+            .filter(|modes| !modes.is_empty())
+            .unwrap_or(&device.crown_modes)
+            .clone()
+    }
+
+    /// The crown-mode list `device_key` stores under the application key `app`,
+    /// or `None` when it has none.
+    ///
+    /// Exact key, deliberately — the same distinction
+    /// [`Self::per_app_overrides`] documents: this answers "what did the user
+    /// author here", which is what an editor shows and clears, while
+    /// [`Self::effective_crown_modes`] answers "what will the app in front
+    /// cycle" and goes through the matcher.
+    #[must_use]
+    pub fn per_app_crown_modes(&self, device_key: &str, app: &str) -> Option<&Vec<CrownMode>> {
+        self.devices
+            .get(device_key)?
+            .per_app_crown_modes
+            .get(app)
+            .filter(|modes| !modes.is_empty())
+    }
+
+    /// Replace `device_key`'s crown modes for the application key `app`. An
+    /// empty list removes the override, so the app falls back to the device's
+    /// default list rather than storing "this app has no modes".
+    pub fn set_per_app_crown_modes(&mut self, device_key: &str, app: &str, modes: Vec<CrownMode>) {
+        let device = self.devices.entry(device_key.to_string()).or_default();
+        if modes.is_empty() {
+            device.per_app_crown_modes.remove(app);
+        } else {
+            device.per_app_crown_modes.insert(app.to_string(), modes);
+        }
     }
 
     /// Enable or disable `device_key`'s Actions Ring.
@@ -769,6 +840,7 @@ impl Config {
     pub fn has_app_override(&self, device_key: &str, app: &str) -> bool {
         self.devices.get(device_key).is_some_and(|d| {
             app_overlay(&d.per_app_bindings, app).is_some_and(|overlay| !overlay.is_empty())
+                || app_overlay(&d.per_app_crown_modes, app).is_some_and(|modes| !modes.is_empty())
         })
     }
 

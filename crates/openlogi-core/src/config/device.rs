@@ -203,6 +203,17 @@ pub struct DeviceConfig {
     /// bindings — the cycle action becomes a no-op rather than an error.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub crown_modes: Vec<CrownMode>,
+    /// Complete crown-mode list overrides keyed by foreground application
+    /// identifier, resolved by
+    /// [`Config::effective_crown_modes`](crate::config::Config::effective_crown_modes).
+    ///
+    /// A per-app list *replaces* [`Self::crown_modes`] wholesale rather than
+    /// merging into it — the same rule as [`Self::action_ring`]'s per-app
+    /// layouts, and for the same reason: the list is a cycle order, and
+    /// overlaying entries onto it by position would silently reorder what a
+    /// tap reaches next. An app with no entry here cycles the default list.
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    pub per_app_crown_modes: BTreeMap<String, Vec<CrownMode>>,
     /// Ordered list of DPI presets cycled through by
     /// [`Action::CycleDpiPresets`] and indexed by
     /// [`Action::SetDpiPreset`]. Empty means "no presets configured" —
@@ -363,6 +374,7 @@ impl Default for DeviceConfig {
             per_app_bindings: BTreeMap::new(),
             action_ring: ActionRingConfig::default(),
             crown_modes: Vec::new(),
+            per_app_crown_modes: BTreeMap::new(),
             dpi_presets: Vec::new(),
             dpi: None,
             lighting: None,
@@ -472,6 +484,8 @@ struct RawDeviceConfig {
     action_ring: ActionRingConfig,
     #[serde(default)]
     crown_modes: Vec<CrownMode>,
+    #[serde(default)]
+    per_app_crown_modes: BTreeMap<String, Vec<CrownMode>>,
     #[serde(default, deserialize_with = "deserialize_dpi_presets")]
     dpi_presets: Vec<Dpi>,
     #[serde(default, deserialize_with = "deserialize_optional_dpi")]
@@ -546,6 +560,7 @@ impl From<RawDeviceConfig> for DeviceConfig {
             per_app_bindings: raw.per_app_bindings,
             action_ring: raw.action_ring,
             crown_modes: raw.crown_modes,
+            per_app_crown_modes: raw.per_app_crown_modes,
             dpi_presets: raw.dpi_presets,
             dpi: raw.dpi,
             lighting: raw.lighting,

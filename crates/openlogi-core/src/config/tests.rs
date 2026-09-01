@@ -434,6 +434,190 @@ fn unset_crown_modes_are_omitted_from_toml() {
     );
 }
 
+/// The whole point of the per-app list: a foreground app cycles its own
+/// modes, and every other app keeps the device's default list.
+#[test]
+fn a_per_app_crown_mode_list_replaces_the_default_one() {
+    let mut cfg = Config::default();
+    cfg.set_crown_modes("2b034", vec![mode("Volume", Action::VolumeUp)]);
+    cfg.set_per_app_crown_modes(
+        "2b034",
+        "com.apple.Safari",
+        vec![mode("Zoom", Action::ScrollUp)],
+    );
+
+    let restored = write_and_read(&cfg);
+    assert_eq!(
+        names(&restored.effective_crown_modes("2b034", Some("com.apple.Safari"))),
+        ["Zoom"],
+        "the app's own list is what its tap cycles"
+    );
+    assert_eq!(
+        names(&restored.effective_crown_modes("2b034", Some("com.apple.Mail"))),
+        ["Volume"],
+        "an app with no list of its own falls back to the default"
+    );
+    assert_eq!(
+        names(&restored.effective_crown_modes("2b034", None)),
+        ["Volume"],
+        "no foreground app resolves to the default list"
+    );
+}
+
+/// A per-app list replaces the default wholesale rather than merging, so a
+/// shorter override must not leave the default's trailing modes reachable.
+#[test]
+fn a_shorter_per_app_list_does_not_inherit_the_remaining_modes() {
+    let mut cfg = Config::default();
+    cfg.set_crown_modes(
+        "2b034",
+        vec![
+            mode("Volume", Action::VolumeUp),
+            mode("Scroll", Action::ScrollUp),
+            mode("Tabs", Action::NextTab),
+        ],
+    );
+    cfg.set_per_app_crown_modes(
+        "2b034",
+        "com.apple.Safari",
+        vec![mode("Zoom", Action::ScrollUp)],
+    );
+    assert_eq!(
+        names(&cfg.effective_crown_modes("2b034", Some("com.apple.Safari"))),
+        ["Zoom"]
+    );
+}
+
+/// The Windows foreground identifier is an executable path, so an `exe:` key
+/// must match it here exactly as it does for a button override — otherwise a
+/// per-app dial profile would silently never engage on Windows.
+#[test]
+fn a_windows_exe_key_matches_a_foreground_path() {
+    let mut cfg = Config::default();
+    cfg.set_crown_modes("2b034", vec![mode("Volume", Action::VolumeUp)]);
+    cfg.set_per_app_crown_modes(
+        "2b034",
+        "exe:code.exe",
+        vec![mode("Zoom", Action::ScrollUp)],
+    );
+    assert_eq!(
+        names(&cfg.effective_crown_modes("2b034", Some(r"c:\users\me\programs\vs code\code.exe"))),
+        ["Zoom"]
+    );
+}
+
+/// Storing an empty list would mean "this app has no modes", which is not a
+/// thing the editor can express — clearing an override restores the default.
+#[test]
+fn clearing_a_per_app_list_restores_the_default_and_leaves_no_trace() {
+    let mut cfg = Config::default();
+    cfg.set_crown_modes("2b034", vec![mode("Volume", Action::VolumeUp)]);
+    cfg.set_per_app_crown_modes(
+        "2b034",
+        "com.apple.Safari",
+        vec![mode("Zoom", Action::ScrollUp)],
+    );
+    cfg.set_per_app_crown_modes("2b034", "com.apple.Safari", Vec::new());
+
+    assert_eq!(cfg.per_app_crown_modes("2b034", "com.apple.Safari"), None);
+    assert_eq!(
+        names(&cfg.effective_crown_modes("2b034", Some("com.apple.Safari"))),
+        ["Volume"]
+    );
+    let toml = toml::to_string_pretty(&cfg).expect("serialize");
+    assert!(
+        !toml.contains("per_app_crown_modes"),
+        "a cleared override must not persist an empty table, got:\n{toml}"
+    );
+}
+
+/// A profile authored only on the dial is still a profile: the scope bar lists
+/// it, and the menu-bar indicator reports the app as overridden.
+#[test]
+fn a_crown_only_profile_is_a_visible_app_profile() {
+    let mut cfg = Config::default();
+    cfg.set_per_app_crown_modes(
+        "2b034",
+        "com.apple.Safari",
+        vec![mode("Zoom", Action::ScrollUp)],
+    );
+    assert_eq!(
+        cfg.app_profiles("2b034").collect::<Vec<_>>(),
+        ["com.apple.Safari"]
+    );
+    assert!(cfg.has_app_override("2b034", "com.apple.Safari"));
+}
+
+/// The two profile maps are listed together, once each.
+#[test]
+fn app_profiles_unions_both_kinds_without_duplicates() {
+    let mut cfg = Config::default();
+    cfg.set_per_app_binding(
+        "2b034",
+        "com.apple.Safari",
+        ButtonId::MiddleClick,
+        Some(Action::PlayPause),
+    );
+    cfg.set_per_app_crown_modes(
+        "2b034",
+        "com.apple.Safari",
+        vec![mode("Zoom", Action::ScrollUp)],
+    );
+    cfg.set_per_app_crown_modes(
+        "2b034",
+        "com.apple.Mail",
+        vec![mode("Volume", Action::VolumeUp)],
+    );
+    assert_eq!(
+        cfg.app_profiles("2b034").collect::<Vec<_>>(),
+        ["com.apple.Mail", "com.apple.Safari"],
+        "key order, each app once"
+    );
+}
+
+/// Deleting a profile must take the dial with it, or the "deleted" profile
+/// would come back the next time that app was in front.
+#[test]
+fn removing_a_profile_also_removes_its_crown_modes() {
+    let mut cfg = Config::default();
+    cfg.set_crown_modes("2b034", vec![mode("Volume", Action::VolumeUp)]);
+    cfg.set_per_app_binding(
+        "2b034",
+        "com.apple.Safari",
+        ButtonId::MiddleClick,
+        Some(Action::PlayPause),
+    );
+    cfg.set_per_app_crown_modes(
+        "2b034",
+        "com.apple.Safari",
+        vec![mode("Zoom", Action::ScrollUp)],
+    );
+
+    cfg.remove_app_profile("2b034", "com.apple.Safari");
+
+    assert_eq!(cfg.per_app_crown_modes("2b034", "com.apple.Safari"), None);
+    assert_eq!(
+        names(&cfg.effective_crown_modes("2b034", Some("com.apple.Safari"))),
+        ["Volume"]
+    );
+    assert_eq!(cfg.app_profiles("2b034").count(), 0);
+}
+
+/// One crown mode, for the per-app tests above.
+fn mode(name: &str, rotate_up: Action) -> CrownMode {
+    CrownMode {
+        name: name.into(),
+        rotate_up: Some(rotate_up),
+        rotate_down: None,
+        press: None,
+    }
+}
+
+/// Mode names in cycle order — what these tests actually assert about.
+fn names(modes: &[CrownMode]) -> Vec<&str> {
+    modes.iter().map(|m| m.name.as_str()).collect()
+}
+
 /// An older config without the field still loads.
 #[test]
 fn config_without_crown_modes_loads_with_none() {

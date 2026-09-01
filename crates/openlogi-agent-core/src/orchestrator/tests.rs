@@ -1009,6 +1009,154 @@ fn a_mode_list_alone_arms_the_crown() {
     assert!(spec.targets.crown);
 }
 
+/// A crown keyboard whose only mode list belongs to one app: the dial must be
+/// diverted while that app is in front and native otherwise, or the app's
+/// profile would either never engage or steal the dial from every other app.
+#[test]
+fn a_per_app_mode_list_arms_the_crown_only_for_that_app() {
+    let mut config = Config::default();
+    config.set_per_app_crown_modes("craft", "com.example.editor", vec![crown_mode("Zoom")]);
+    let mut orch = orchestrator(config);
+    orch.devices = vec![crown_keyboard()];
+
+    assert!(
+        orch.keyboard_spec_for().is_none(),
+        "no app in front: nothing claims the dial"
+    );
+
+    orch.set_current_app(Some(ForegroundApp::unnamed("com.example.editor".into())));
+    assert!(
+        orch.keyboard_spec_for()
+            .expect("the app's list must arm the crown")
+            .targets
+            .crown
+    );
+
+    orch.set_current_app(Some(ForegroundApp::unnamed("com.example.other".into())));
+    assert!(
+        orch.keyboard_spec_for().is_none(),
+        "an app with no list of its own leaves the dial native"
+    );
+}
+
+/// The published state is what the watcher resolves rotation against, so the
+/// foreground app's own list is what has to appear in it.
+#[test]
+fn republishing_publishes_the_foreground_apps_own_mode_list() {
+    let mut config = Config::default();
+    config.set_crown_modes("craft", vec![crown_mode("Volume")]);
+    config.set_per_app_crown_modes("craft", "com.example.editor", vec![crown_mode("Zoom")]);
+    let mut orch = orchestrator(config);
+    orch.devices = vec![crown_keyboard()];
+
+    orch.republish_crown_modes();
+    assert_eq!(active_mode(&orch), Some("Volume".to_string()));
+
+    // `set_current_app` republishes on its own — that is the seam that makes
+    // the dial follow the foreground app at all.
+    orch.set_current_app(Some(ForegroundApp::unnamed("com.example.editor".into())));
+    assert_eq!(active_mode(&orch), Some("Zoom".to_string()));
+
+    orch.set_current_app(Some(ForegroundApp::unnamed("com.example.other".into())));
+    assert_eq!(
+        active_mode(&orch),
+        Some("Volume".to_string()),
+        "leaving the app restores the default list"
+    );
+}
+
+/// Two apps that both cycle the default list must hand the dial over in the
+/// mode the user left it in — an app switch is not a reason to yank a shared
+/// list back to its first mode.
+#[test]
+fn apps_sharing_the_default_list_keep_the_active_mode() {
+    let mut config = Config::default();
+    config.set_crown_modes("craft", vec![crown_mode("Volume"), crown_mode("Scroll")]);
+    let mut orch = orchestrator(config);
+    orch.devices = vec![crown_keyboard()];
+    orch.republish_crown_modes();
+
+    orch.shared
+        .crown_modes
+        .write()
+        .expect("lock")
+        .state_for(Some("craft"))
+        .expect("state")
+        .cycle();
+    assert_eq!(active_mode(&orch), Some("Scroll".to_string()));
+
+    orch.set_current_app(Some(ForegroundApp::unnamed("com.example.other".into())));
+    assert_eq!(
+        active_mode(&orch),
+        Some("Scroll".to_string()),
+        "neither app overrides the list, so the position survives the switch"
+    );
+}
+
+/// Entering an app with its own list starts that list at its first mode: the
+/// old index pointed into a list this app never cycled.
+#[test]
+fn entering_an_app_with_its_own_list_starts_at_its_first_mode() {
+    let mut config = Config::default();
+    config.set_crown_modes("craft", vec![crown_mode("Volume"), crown_mode("Scroll")]);
+    config.set_per_app_crown_modes(
+        "craft",
+        "com.example.editor",
+        vec![crown_mode("Zoom"), crown_mode("Tabs")],
+    );
+    let mut orch = orchestrator(config);
+    orch.devices = vec![crown_keyboard()];
+    orch.republish_crown_modes();
+
+    orch.shared
+        .crown_modes
+        .write()
+        .expect("lock")
+        .state_for(Some("craft"))
+        .expect("state")
+        .cycle();
+    assert_eq!(active_mode(&orch), Some("Scroll".to_string()));
+
+    orch.set_current_app(Some(ForegroundApp::unnamed("com.example.editor".into())));
+    assert_eq!(
+        active_mode(&orch),
+        Some("Zoom".to_string()),
+        "the app's own list begins where its editor shows it beginning"
+    );
+}
+
+/// A keyboard with a crown and nothing else configured, for the mode tests.
+fn crown_keyboard() -> AgentDevice {
+    AgentDevice {
+        kind: DeviceKind::Keyboard,
+        capabilities: Some(Capabilities {
+            crown: true,
+            ..Capabilities::default()
+        }),
+        ..dev("craft", 2, true)
+    }
+}
+
+/// A mode that binds one direction, so it is not inert.
+fn crown_mode(name: &str) -> CrownMode {
+    CrownMode {
+        name: name.into(),
+        rotate_up: Some(Action::VolumeUp),
+        rotate_down: None,
+        press: None,
+    }
+}
+
+/// The mode the published state says the dial is in.
+fn active_mode(orch: &Orchestrator) -> Option<String> {
+    orch.shared
+        .crown_modes
+        .read()
+        .expect("lock")
+        .active_name(Some("craft"))
+        .map(str::to_string)
+}
+
 /// An empty list is not a binding — the dial stays native.
 #[test]
 fn an_empty_mode_list_leaves_the_crown_native() {

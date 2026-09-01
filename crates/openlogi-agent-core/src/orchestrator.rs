@@ -303,8 +303,13 @@ impl Orchestrator {
         // A mode list counts as a binding: with modes configured, rotation
         // resolves through the active mode rather than through `bindings`, so
         // gating on direct bindings alone would leave a mode-only crown
-        // undiverted and the whole feature silently dead.
-        let has_modes = !self.config.crown_modes(&dev.config_key).is_empty();
+        // undiverted and the whole feature silently dead. App-scoped like the
+        // bindings above, so a list configured only for the app in front arms
+        // the dial while that app is in front — and only then.
+        let has_modes = !self
+            .config
+            .effective_crown_modes(&dev.config_key, self.current_app.as_deref())
+            .is_empty();
         let crown = dev.capabilities.is_some_and(|caps| caps.crown)
             && (has_modes || ButtonId::CROWN_CONTROLS.iter().any(is_bound));
         let targets = KeyboardCaptureTargets { keys, crown };
@@ -371,11 +376,22 @@ impl Orchestrator {
     /// preserving a device's live cycle index (and lazily discovered
     /// capabilities) across rebuilds whose presets did not change — a config
     /// reload must not snap DPI back to `preset[0]`.
-    /// Push each device's configured crown-mode list into the shared state.
+    /// Push each device's effective crown-mode list into the shared state.
     ///
     /// Unlike the DPI rebuild this keeps offline devices: a crown mode is
     /// host-side state with no device write behind it, so a sleeping keyboard
     /// that wakes mid-session should still be in the mode the user left it in.
+    ///
+    /// The list is resolved for the foreground app, and `set_current_app`
+    /// routes through here, so switching apps re-resolves it. What that means
+    /// for the *active position* follows from `CrownModes::republish`, which
+    /// keeps the index only while the list itself is unchanged: apps sharing
+    /// the default list hand the dial over in the mode the user left it in,
+    /// while entering an app with its own list starts that list at its first
+    /// mode. That is the honest behaviour — a preserved index would point into
+    /// a list the user never cycled — and it is also the predictable one: an
+    /// app's own dial profile always begins where its editor shows it
+    /// beginning.
     fn republish_crown_modes(&self) {
         let Ok(mut guard) = self.shared.crown_modes.write() else {
             warn!("crown_modes lock poisoned — republish skipped");
@@ -386,7 +402,9 @@ impl Orchestrator {
             .iter()
             .filter(|dev| self.config.device_enabled(&dev.config_key))
             .filter_map(|dev| {
-                let modes = self.config.crown_modes(&dev.config_key);
+                let modes = self
+                    .config
+                    .effective_crown_modes(&dev.config_key, self.current_app.as_deref());
                 (!modes.is_empty()).then(|| (dev.config_key.clone(), modes))
             })
             .collect();

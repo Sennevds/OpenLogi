@@ -1,21 +1,27 @@
-//! The crown-dial binding panel — the Crown tab body.
+//! The crown-dial panel — the Crown tab body.
 //!
 //! The Craft keyboard's crown is a rotary dial with four bindable controls
 //! ([`ButtonId::CROWN_CONTROLS`]): the two rotation directions, the press, and
-//! a touch tap. Selecting one on the left opens the shared action catalog on
-//! the right, mirroring the function-row remapper's select-then-pick model.
+//! a touch tap. The panel has two halves, both editing the profile
+//! [`AppState::editing_app`] has open:
+//!
+//! - the dial's own bindings, one row per control; and
+//! - its **modes** ([`modes`]), the list a tap cycles through, where each mode
+//!   can retarget rotation and the press without touching those bindings.
+//!
+//! Selecting any row on the left opens the shared action catalog on the right,
+//! mirroring the function-row remapper's select-then-pick model.
 //!
 //! Deliberately a list rather than a hardware diagram: the crown has no marker
 //! in Logi's keyboard metadata, and hotspot positions are never synthesized
 //! (see `.claude/rules/gui.md`).
 //!
-//! Crown bindings are per-device (`config.devices[key].bindings`), so this
-//! commits through [`AppState::commit_binding`] like the mouse buttons — and
-//! therefore honours the per-app profile the user has open.
-//!
 //! An unbound control keeps the dial's firmware behaviour (volume): the agent
-//! only diverts the crown while one of the four carries a real action, so the
-//! panel's "Off" is a live state, not just an empty slot.
+//! only diverts the crown while one of the four carries a real action — or a
+//! mode list gives rotation somewhere to go — so the panel's "Off" is a live
+//! state, not just an empty slot.
+
+mod modes;
 
 use std::rc::Rc;
 
@@ -27,7 +33,7 @@ use gpui::{
     Styled, Subscription, Window, div, prelude::FluentBuilder as _, px, svg,
 };
 use gpui_component::{IconName, Selectable as _, h_flex, v_flex};
-use openlogi_core::binding::{Action, ButtonId, default_binding};
+use openlogi_core::binding::{Action, ButtonId, CrownMode, default_binding};
 
 use crate::features::mouse::picker::{
     PickFn, action_icon_path, action_rows, compact_panel, divider, editor_scroll_list,
@@ -43,6 +49,16 @@ const PANEL_W: f32 = 320.;
 /// Width of the control list beside it.
 const LIST_W: f32 = 260.;
 
+/// What the picker on the right is currently editing.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Target {
+    /// One of the dial's own controls, by index into
+    /// [`ButtonId::CROWN_CONTROLS`].
+    Control(usize),
+    /// One control inside the mode at this index.
+    ModeControl(usize, ButtonId),
+}
+
 /// One crown control resolved for display.
 struct CrownSlot {
     button: ButtonId,
@@ -50,11 +66,10 @@ struct CrownSlot {
     action: Action,
 }
 
-/// The crown-dial binding panel.
+/// The crown-dial panel.
 pub struct CrownPanel {
-    /// Index into [`ButtonId::CROWN_CONTROLS`], or `None` when the picker is
-    /// closed.
-    selected: Option<usize>,
+    /// What the picker is open on, or `None` when it is closed.
+    selected: Option<Target>,
     _state_obs: Subscription,
 }
 
@@ -79,18 +94,18 @@ impl CrownPanel {
         }
     }
 
-    /// Toggle the picker for one control: clicking the open one closes it.
-    fn click_control(&mut self, idx: usize, cx: &mut Context<Self>) {
-        self.selected = if self.selected == Some(idx) {
+    /// Open the picker on `target`, or close it if it is already open there.
+    fn select(&mut self, target: Target, cx: &mut Context<Self>) {
+        self.selected = if self.selected == Some(target) {
             None
         } else {
-            Some(idx)
+            Some(target)
         };
         cx.notify();
     }
 
-    /// The action-catalog card for the selected control.
-    fn picker_panel(slot: &CrownSlot, view: &Entity<Self>, cx: &mut Context<Self>) -> gpui::Div {
+    /// The action-catalog card for one of the dial's own controls.
+    fn control_picker(slot: &CrownSlot, view: &Entity<Self>, cx: &mut Context<Self>) -> gpui::Div {
         let pal = theme::palette(cx);
         let button = slot.button;
         let current = catalog_selection(&slot.action).cloned();
@@ -113,32 +128,77 @@ impl CrownPanel {
             .is_some_and(|overrides| overrides.contains_key(&button));
         let view_for_clear = view.clone();
 
-        compact_panel(pal)
-            .w(px(PANEL_W))
-            .child(
-                div()
-                    .px_2()
-                    .pb_1()
-                    .text_caption()
-                    .text_color(pal.text_muted)
-                    .child(tr!("Bind %{name}", name => tr!(button.label()).to_string())),
+        picker_card(
+            tr!("Bind %{name}", name => tr!(button.label()).to_string()),
+            rows,
+            pal,
+        )
+        .when(overridden, |panel| {
+            panel.child(divider(pal)).child(
+                control_button("crown-use-default")
+                    .w_full()
+                    .icon(IconName::Undo)
+                    .label(tr!("Use the default profile"))
+                    .on_click(move |_event, _window, cx| {
+                        AppState::update_bindings(cx, |state| {
+                            state.clear_app_binding(button);
+                        });
+                        view_for_clear.update(cx, |_, vcx| vcx.notify());
+                    }),
             )
-            .child(divider(pal))
-            .child(editor_scroll_list("crown-panel-scroll", rows))
-            .when(overridden, |panel| {
-                panel.child(divider(pal)).child(
-                    control_button("crown-use-default")
-                        .w_full()
-                        .icon(IconName::Undo)
-                        .label(tr!("Use the default profile"))
-                        .on_click(move |_event, _window, cx| {
-                            AppState::update_bindings(cx, |state| {
-                                state.clear_app_binding(button);
-                            });
-                            view_for_clear.update(cx, |_, vcx| vcx.notify());
-                        }),
-                )
-            })
+        })
+    }
+
+    /// The action-catalog card for one control inside one mode.
+    ///
+    /// Carries a clear button the dial's own controls have no use for: a mode
+    /// may leave a control *unset*, which is not the same as binding it to
+    /// nothing — unset falls through to the control's ordinary binding while
+    /// the mode is active.
+    fn mode_picker(
+        index: usize,
+        control: ButtonId,
+        mode: &CrownMode,
+        view: &Entity<Self>,
+        cx: &mut Context<Self>,
+    ) -> gpui::Div {
+        let pal = theme::palette(cx);
+        let current = mode.action_for(control).cloned();
+
+        let view_for_pick = view.clone();
+        let on_pick: PickFn = Rc::new(move |action, _window, cx| {
+            AppState::update_bindings(cx, |state| {
+                state.commit_crown_mode_action(index, control, Some(action));
+            });
+            view_for_pick.update(cx, |_, vcx| vcx.notify());
+        });
+
+        let rows = action_rows("crown-mode-action", current.as_ref(), &on_pick, pal);
+        let view_for_clear = view.clone();
+
+        picker_card(
+            tr!(
+                "%{mode}: bind %{name}",
+                mode => mode.name.clone(),
+                name => tr!(control.label()).to_string(),
+            ),
+            rows,
+            pal,
+        )
+        .when(current.is_some(), |panel| {
+            panel.child(divider(pal)).child(
+                control_button("crown-mode-fall-through")
+                    .w_full()
+                    .icon(IconName::Undo)
+                    .label(tr!("Use the control's own binding"))
+                    .on_click(move |_event, _window, cx| {
+                        AppState::update_bindings(cx, |state| {
+                            state.commit_crown_mode_action(index, control, None);
+                        });
+                        view_for_clear.update(cx, |_, vcx| vcx.notify());
+                    }),
+            )
+        })
     }
 }
 
@@ -160,12 +220,35 @@ impl Render for CrownPanel {
                 CrownSlot { button, action }
             })
             .collect();
+        // A mode list only does something if some control cycles it, and the
+        // modes section says so when nothing does.
+        let cycles_modes = slots
+            .iter()
+            .any(|slot| slot.action == Action::CycleCrownMode);
+
+        let state = AppState::try_read(cx);
+        let modes = state
+            .as_ref()
+            .map(|state| state.current_crown_modes())
+            .unwrap_or_default();
+        let modes_overridden = state.is_some_and(AppState::crown_modes_are_overridden);
+        // A removed mode leaves the picker open on an index that no longer
+        // exists; drop the selection rather than render against a stale row.
+        let selected = self.selected.filter(|target| match *target {
+            Target::Control(idx) => idx < slots.len(),
+            Target::ModeControl(idx, _) => idx < modes.len(),
+        });
+        self.selected = selected;
 
         let view = cx.entity();
-        let picker = self
-            .selected
-            .and_then(|idx| slots.get(idx))
-            .map(|slot| Self::picker_panel(slot, &view, cx));
+        let picker = selected.and_then(|target| match target {
+            Target::Control(idx) => slots
+                .get(idx)
+                .map(|slot| Self::control_picker(slot, &view, cx)),
+            Target::ModeControl(idx, control) => modes
+                .get(idx)
+                .map(|mode| Self::mode_picker(idx, control, mode, &view, cx)),
+        });
 
         v_flex()
             .gap_3()
@@ -181,25 +264,57 @@ impl Render for CrownPanel {
                 h_flex()
                     .gap_4()
                     .items_start()
-                    .child(control_list(&slots, self.selected, &view, pal))
+                    .child(
+                        v_flex()
+                            .gap_4()
+                            .w(px(LIST_W))
+                            .child(control_list(&slots, selected, &view, pal))
+                            .child(modes::modes_section(
+                                &modes,
+                                cycles_modes,
+                                modes_overridden,
+                                selected,
+                                &view,
+                                pal,
+                            )),
+                    )
                     .children(picker),
             )
     }
 }
 
+/// The picker card shell shared by both kinds of target.
+fn picker_card(
+    caption: impl Into<gpui::SharedString>,
+    rows: Vec<gpui::Div>,
+    pal: Palette,
+) -> gpui::Div {
+    compact_panel(pal)
+        .w(px(PANEL_W))
+        .child(
+            div()
+                .px_2()
+                .pb_1()
+                .text_caption()
+                .text_color(pal.text_muted)
+                .child(caption.into()),
+        )
+        .child(divider(pal))
+        .child(editor_scroll_list("crown-panel-scroll", rows))
+}
+
 /// The four crown controls, each showing the action in force.
 fn control_list(
     slots: &[CrownSlot],
-    selected: Option<usize>,
+    selected: Option<Target>,
     view: &Entity<CrownPanel>,
     pal: Palette,
 ) -> gpui::Div {
-    compact_panel(pal).w(px(LIST_W)).children(
-        slots
-            .iter()
-            .enumerate()
-            .map(|(idx, slot)| control_row(idx, slot, selected == Some(idx), view, pal)),
-    )
+    compact_panel(pal)
+        .w_full()
+        .children(slots.iter().enumerate().map(|(idx, slot)| {
+            control_row(idx, slot, selected == Some(Target::Control(idx)), view, pal)
+        }))
 }
 
 /// Which catalog row to tick for a control's current action.
@@ -257,7 +372,7 @@ fn control_row(
                 .child(action_label),
         )
         .on_click(move |_event, _window, cx| {
-            view.update(cx, |panel, vcx| panel.click_control(idx, vcx));
+            view.update(cx, |panel, vcx| panel.select(Target::Control(idx), vcx));
         })
 }
 
@@ -286,6 +401,29 @@ mod tests {
             assert!(
                 !button.label().is_empty(),
                 "{button:?} would render an unnamed row"
+            );
+        }
+    }
+
+    /// A mode may own every crown control except the tap — binding the tap
+    /// inside a mode could leave the user with no way to cycle out of it.
+    #[test]
+    fn the_mode_editor_offers_every_control_a_mode_can_own() {
+        for control in modes::MODE_CONTROLS {
+            assert_ne!(
+                control,
+                ButtonId::CrownTap,
+                "the tap cycles modes and must never be editable inside one"
+            );
+            let mode = CrownMode {
+                name: "probe".into(),
+                rotate_up: Some(Action::VolumeUp),
+                rotate_down: Some(Action::VolumeDown),
+                press: Some(Action::PlayPause),
+            };
+            assert!(
+                mode.action_for(control).is_some(),
+                "{control:?} is editable here but a mode cannot store it"
             );
         }
     }

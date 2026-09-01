@@ -99,6 +99,19 @@ name = "Scroll"
 rotate_up = "ScrollUp"
 rotate_down = "ScrollDown"
 
+# A per-app list replaces the two modes above while that application is in
+# front, so the dial cycles History → Tabs in the editor and Volume → Scroll
+# everywhere else. Keyed exactly like `per_app_bindings`, `exe:` included.
+[[devices."receiver:aabbccdd:slot:2".per_app_crown_modes."exe:code.exe"]]
+name = "History"
+rotate_up = "Redo"
+rotate_down = "Undo"
+
+[[devices."receiver:aabbccdd:slot:2".per_app_crown_modes."exe:code.exe"]]
+name = "Tabs"
+rotate_up = "NextTab"
+rotate_down = "PrevTab"
+
 # Since schema 5 a device is keyed by what it *is* — `unit:<hex>` or
 # `serial:<s>` — rather than by the route it was reached on, so its settings
 # follow it between its receiver and a cable instead of splitting into two
