@@ -22,6 +22,7 @@
 //! mode list gives rotation somewhere to go — so the panel's "Off" is a live
 //! state, not just an empty slot.
 
+mod chord;
 mod modes;
 
 use std::rc::Rc;
@@ -35,7 +36,7 @@ use gpui::{
     prelude::FluentBuilder as _, px, svg,
 };
 use gpui_component::{IconName, Selectable as _, h_flex, input::InputState, v_flex};
-use openlogi_core::binding::{Action, ButtonId, CrownMode, default_binding};
+use openlogi_core::binding::{Action, ButtonId, CrownMode, GestureDirection, default_binding};
 
 use crate::features::mouse::picker::{
     PickFn, action_icon_path, action_rows, compact_panel, divider, editor_scroll_list,
@@ -62,6 +63,8 @@ enum Target {
     Mode(usize),
     /// One control inside the mode at this index.
     ModeControl(usize, ButtonId),
+    /// One slot of the crown press's press-and-rotate chord.
+    Chord(GestureDirection),
 }
 
 /// One crown control resolved for display.
@@ -140,11 +143,20 @@ impl CrownPanel {
             .is_some_and(|overrides| overrides.contains_key(&button));
         let view_for_clear = view.clone();
 
+        let in_app_profile =
+            AppState::try_read(cx).is_some_and(|state| state.editing_app().is_some());
         picker_card(
             tr!("Bind %{name}", name => tr!(button.label()).to_string()),
             rows,
             pal,
         )
+        // Only the press can hold a chord: a rotation direction or the tap has
+        // nothing to hold it with.
+        .when(button == ButtonId::CrownPress, |panel| {
+            panel
+                .child(divider(pal))
+                .child(chord::enable_row(in_app_profile, pal))
+        })
         .when(overridden, |panel| {
             panel.child(divider(pal)).child(
                 control_button("crown-use-default")
@@ -211,6 +223,36 @@ impl CrownPanel {
                     }),
             )
         })
+    }
+
+    /// The action-catalog card for one press-and-rotate slot.
+    ///
+    /// No fall-through button, unlike a mode's control: a chord slot has no
+    /// ordinary binding underneath it to defer to, so "unset" and "do nothing"
+    /// are the same state and the catalog's own "None" already says it.
+    fn chord_picker(
+        direction: GestureDirection,
+        current: Option<&Action>,
+        view: &Entity<Self>,
+        cx: &mut Context<Self>,
+    ) -> gpui::Div {
+        let pal = theme::palette(cx);
+        let current = current.filter(|action| **action != Action::None).cloned();
+
+        let view_for_pick = view.clone();
+        let on_pick: PickFn = Rc::new(move |action, _window, cx| {
+            AppState::update_bindings(cx, |state| {
+                state.commit_gesture_binding(ButtonId::CrownPress, direction, action);
+            });
+            view_for_pick.update(cx, |_, vcx| vcx.notify());
+        });
+
+        let rows = action_rows("crown-chord-action", current.as_ref(), &on_pick, pal);
+        picker_card(
+            tr!("Press and rotate: %{name}", name => chord::slot_caption(direction)),
+            rows,
+            pal,
+        )
     }
 
     /// The name field for one mode.
@@ -310,11 +352,13 @@ impl Render for CrownPanel {
         let in_app_profile = state
             .as_ref()
             .is_some_and(|state| state.editing_app().is_some());
+        let chord_map = state.as_ref().and_then(|state| state.crown_chord());
         // A removed mode leaves the editor open on an index that no longer
         // exists; drop the selection rather than render against a stale row.
         let selected = self.selected.filter(|target| match *target {
             Target::Control(idx) => idx < slots.len(),
             Target::Mode(idx) | Target::ModeControl(idx, _) => idx < modes.len(),
+            Target::Chord(_) => chord_map.is_some(),
         });
         self.selected = selected;
 
@@ -329,6 +373,9 @@ impl Render for CrownPanel {
             Some(Target::ModeControl(idx, control)) => modes
                 .get(idx)
                 .map(|mode| Self::mode_picker(idx, control, mode, &view, cx)),
+            Some(Target::Chord(direction)) => chord_map
+                .as_ref()
+                .map(|map| Self::chord_picker(direction, map.get(&direction), &view, cx)),
             None => None,
         };
 
@@ -351,6 +398,11 @@ impl Render for CrownPanel {
                             .gap_4()
                             .w(px(LIST_W))
                             .child(control_list(&slots, selected, &view, pal))
+                            .children(
+                                chord_map
+                                    .as_ref()
+                                    .map(|map| chord::chord_card(map, selected, &view, pal)),
+                            )
                             .child(modes::modes_section(
                                 &modes::ModesView {
                                     modes: &modes,

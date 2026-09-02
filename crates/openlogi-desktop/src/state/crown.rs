@@ -19,7 +19,9 @@
 //!   [`AppState::clear_app_crown_modes`] hands the app back to the device's
 //!   list.
 
-use openlogi_core::binding::{Action, ButtonId, CrownMode};
+use std::collections::BTreeMap;
+
+use openlogi_core::binding::{Action, Binding, ButtonId, CrownMode, GestureDirection};
 
 use super::{AppState, DeviceRecord};
 
@@ -205,6 +207,21 @@ impl AppState {
         }
         *slot = action;
         self.commit_crown_modes(modes, "crown mode action");
+    }
+
+    /// The crown press's press-and-rotate map, when it is configured as a
+    /// chord holder rather than an ordinary single action.
+    ///
+    /// Read from config rather than from the GUI's gesture projection: that
+    /// projection is built from `ButtonId::ALL`, and the crown's controls sit
+    /// outside it, so the crown press never appears there.
+    #[must_use]
+    pub fn crown_chord(&self) -> Option<BTreeMap<GestureDirection, Action>> {
+        let key = self.crown_config_key()?;
+        match self.config.bindings_for(key).get(&ButtonId::CrownPress) {
+            Some(Binding::Gesture(map)) => Some(map.clone()),
+            Some(Binding::Single(_) | Binding::LongPress(_)) | None => None,
+        }
     }
 
     /// The active device's config key, when it can carry saved settings.
