@@ -109,7 +109,15 @@ Common device fields are:
   identifiers guaranteed to match, since the four platforms name applications
   differently and a profile authored under one namespace will not match under
   another. An overlay holds one action per button; gesture-direction maps live
-  in `bindings`
+  in `bindings`.
+
+  The selector also lists installed applications the agent has *not* seen in
+  front. On Windows those are keyed `exe:<filename>.exe` rather than on the
+  path the installed-app catalog reports: that path is resolved from a Start
+  Menu shortcut, and a shortcut whose target canonicalizes to a UNC location
+  yields `unc\host\share\…`, which no foreground identifier can equal. An
+  application the agent has already seen keeps its exact runtime path, which
+  still distinguishes two builds sharing an executable name
 - `action_ring`: default and complete per-application eight-slot layouts
 - `lighting`, `smartshift`, standalone `light`, and camera controls / profiles
 - `host_switch_targets` and `fn_lock` for compatible keyboards

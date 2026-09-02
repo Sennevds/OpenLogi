@@ -238,16 +238,37 @@ fn identity_for_application(
     observed: &HashSet<String>,
     preferred: IdentityKind,
 ) -> Option<String> {
-    application
+    if let Some(identity) = application
         .identities
         .iter()
         .find(|identity| observed.contains(identity.value()))
-        .or_else(|| {
-            application
-                .identities
-                .iter()
-                .find(|identity| identity.kind() == preferred)
-        })
+    {
+        return Some(identity.value().to_string());
+    }
+
+    // Windows: a catalog path is resolved from a Start Menu shortcut, not from
+    // the running process, and the two disagree often enough to matter. A
+    // shortcut whose target canonicalizes to a UNC path yields
+    // `unc\host\share\…` (`std::fs::canonicalize` returns `\\?\UNC\…` and the
+    // catalog strips only the `\\?\`), which no foreground identifier can ever
+    // equal — the profile would sit in the config looking correct and never
+    // once apply. Self-updating installers move the directory out from under
+    // such a key anyway. So an app the agent has *not* been seen running is
+    // keyed on `exe:<filename>`, the stable fallback the matcher already
+    // resolves; an observed app keeps its exact runtime path above.
+    #[cfg(target_os = "windows")]
+    if let Some(identity) = application
+        .identities
+        .iter()
+        .find(|identity| identity.kind() == IdentityKind::WindowsExecutableName)
+    {
+        return Some(format!("exe:{}", identity.value()));
+    }
+
+    application
+        .identities
+        .iter()
+        .find(|identity| identity.kind() == preferred)
         // `StartupWMClass` is optional in desktop files. Keep the installed
         // catalog complete on X11/GNOME by falling back to its stable desktop
         // ID. Recently observed candidates always take the exact runtime ID
@@ -1084,6 +1105,53 @@ mod tests {
             )
             .as_deref(),
             Some("org.example.Editor")
+        );
+    }
+
+    /// A Start Menu shortcut whose target canonicalizes to a UNC path leaves
+    /// the catalog holding `unc\host\share\…`, which no Windows foreground
+    /// identifier (a `c:\…` image path) can ever equal. Keying a profile on it
+    /// produced config that looked right and never applied — JetBrains Rider,
+    /// in the report that found this.
+    #[cfg(target_os = "windows")]
+    #[test]
+    fn an_unobserved_windows_app_is_keyed_on_its_executable_name() {
+        let application = application_with_identities(vec![
+            ApplicationIdentity::new(
+                IdentityKind::WindowsExecutablePath,
+                r"unc\desktop-1\users\me\appdata\local\programs\rider\bin\rider64.exe",
+            ),
+            ApplicationIdentity::new(IdentityKind::WindowsExecutableName, "rider64.exe"),
+        ]);
+
+        assert_eq!(
+            identity_for_application(
+                &application,
+                &HashSet::new(),
+                IdentityKind::WindowsExecutablePath,
+            )
+            .as_deref(),
+            Some("exe:rider64.exe"),
+            "an unrunning app must be keyed on the matcher's stable fallback"
+        );
+    }
+
+    /// Precision is still preferred when the agent has actually seen the app:
+    /// an exact path distinguishes two builds of the same executable name.
+    #[cfg(target_os = "windows")]
+    #[test]
+    fn an_observed_windows_app_keeps_its_exact_runtime_path() {
+        let path = r"c:\users\me\appdata\local\programs\rider\bin\rider64.exe";
+        let application = application_with_identities(vec![
+            ApplicationIdentity::new(IdentityKind::WindowsExecutablePath, path),
+            ApplicationIdentity::new(IdentityKind::WindowsExecutableName, "rider64.exe"),
+        ]);
+        let observed = HashSet::from([path.to_string()]);
+
+        assert_eq!(
+            identity_for_application(&application, &observed, IdentityKind::WindowsExecutablePath,)
+                .as_deref(),
+            Some(path)
         );
     }
 
