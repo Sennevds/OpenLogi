@@ -98,6 +98,24 @@ impl Binding {
         }
     }
 
+    /// Whether any slot of this binding carries a real action.
+    ///
+    /// The "is this control bound?" gates need this rather than
+    /// [`Self::click_action`]: a gesture binding may leave its click unset and
+    /// bind only directions — a crown press configured purely as a
+    /// press-and-rotate chord is exactly that shape — and judging it by its
+    /// click alone would read it as unbound and leave the control undiverted.
+    /// A threshold binding always counts: both of its slots are actions the
+    /// user chose.
+    #[must_use]
+    pub fn binds_anything(&self) -> bool {
+        match self {
+            Self::Single(action) => *action != Action::None,
+            Self::LongPress(_) => true,
+            Self::Gesture(map) => map.values().any(|action| *action != Action::None),
+        }
+    }
+
     /// The action bound to `direction`, if this is a gesture binding.
     /// [`Single`](Binding::Single) has no directions and returns `None`.
     #[must_use]

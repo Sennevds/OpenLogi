@@ -6,7 +6,7 @@ use super::{
     pick_current, plan_reapply, reapply_targets, stable_id,
 };
 use openlogi_core::app::ForegroundApp;
-use openlogi_core::binding::{Action, Binding, ButtonId, CrownMode};
+use openlogi_core::binding::{Action, Binding, ButtonId, CrownMode, GestureDirection};
 use openlogi_core::config::{
     Config, DeviceConfig, LightSettings, LinkConfig, ScrollResolution, VerticalScrollSensitivity,
 };
@@ -1123,6 +1123,29 @@ fn entering_an_app_with_its_own_list_starts_at_its_first_mode() {
         Some("Zoom".to_string()),
         "the app's own list begins where its editor shows it beginning"
     );
+}
+
+/// A crown press bound purely as a press-and-rotate chord carries no click
+/// action, so a gate reading only the click would leave the dial native and
+/// the chord silently dead.
+#[test]
+fn a_chord_only_crown_press_arms_the_crown() {
+    let mut config = Config::default();
+    config.set_binding(
+        "craft",
+        ButtonId::CrownPress,
+        Binding::Gesture(std::collections::BTreeMap::from([
+            (GestureDirection::Up, Action::VolumeUp),
+            (GestureDirection::Down, Action::VolumeDown),
+        ])),
+    );
+    let mut orch = orchestrator(config);
+    orch.devices = vec![crown_keyboard()];
+
+    let spec = orch
+        .keyboard_spec_for()
+        .expect("a chord map must arm the crown");
+    assert!(spec.targets.crown);
 }
 
 /// A keyboard with a crown and nothing else configured, for the mode tests.

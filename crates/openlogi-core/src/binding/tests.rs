@@ -618,3 +618,38 @@ fn scroll_actions_lower_to_unit_direction() {
         Effect::Scroll { dx: 1, dy: 0 }
     );
 }
+
+/// A crown press configured purely as a press-and-rotate chord binds only
+/// directions. Judging such a binding by its click alone reads it as unbound,
+/// which is what would leave the dial undiverted and the chord dead.
+#[test]
+fn a_gesture_binding_with_only_directions_still_binds_something() {
+    let chord = Binding::Gesture(BTreeMap::from([
+        (GestureDirection::Up, Action::VolumeUp),
+        (GestureDirection::Down, Action::VolumeDown),
+    ]));
+    assert_eq!(
+        chord.click_action(),
+        Action::None,
+        "the click slot really is unset"
+    );
+    assert!(chord.binds_anything(), "but the directions are bound");
+}
+
+#[test]
+fn a_binding_whose_every_slot_is_none_binds_nothing() {
+    assert!(!Binding::Single(Action::None).binds_anything());
+    assert!(
+        !Binding::Gesture(BTreeMap::from([(GestureDirection::Up, Action::None)])).binds_anything()
+    );
+    assert!(!Binding::Gesture(BTreeMap::new()).binds_anything());
+}
+
+#[test]
+fn a_single_and_a_threshold_binding_bind_something() {
+    assert!(Binding::Single(Action::VolumeUp).binds_anything());
+    assert!(
+        Binding::LongPress(LongPressBinding::new(Action::None, Action::None)).binds_anything(),
+        "both slots of a threshold binding are actions the user chose"
+    );
+}

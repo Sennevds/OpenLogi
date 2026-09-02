@@ -83,11 +83,20 @@ KeyScreenCapture = "Sleep"
 # driving volume in firmware, so leaving these unset keeps the dial native.
 CrownRotateUp = "VolumeUp"
 CrownRotateDown = "VolumeDown"
-CrownPress = "PlayPause"
 # Tapping the crown walks the mode list below; rotation then runs whichever
 # mode is active. A mode leaves `press` unset here, so the crown press keeps
-# the `CrownPress` binding above in every mode.
+# the chord binding below in every mode.
 CrownTap = "CycleCrownMode"
+
+# Press and rotate. A gesture binding on the crown press makes it a chord
+# holder: `Up`/`Down` are the rotation directions *while it is held*, and
+# `Click` is a press that never turned — a press-and-turn runs a direction and
+# never the click. This table *is* the crown press's binding: use it instead of
+# a plain `CrownPress = "PlayPause"`, since a button has exactly one binding.
+[devices."receiver:aabbccdd:slot:2".bindings.CrownPress]
+Click = "PlayPause"
+Up = "HorizontalScrollRight"
+Down = "HorizontalScrollLeft"
 
 [[devices."receiver:aabbccdd:slot:2".crown_modes]]
 name = "Volume"

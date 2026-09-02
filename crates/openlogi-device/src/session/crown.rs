@@ -28,7 +28,7 @@ use hidpp::{
         },
     },
 };
-use openlogi_core::binding::ButtonId;
+use openlogi_core::binding::{ButtonId, GestureDirection};
 use tokio::sync::mpsc;
 use tracing::{debug, warn};
 
@@ -259,6 +259,11 @@ pub(super) struct CrownTranslator {
     residue: i32,
     /// Whether the crown's button is currently held, to emit balanced edges.
     pressed: bool,
+    /// Whether rotation has been reported since the button went down, which
+    /// makes this press a chord rather than a click. Mirrors the raw-XY gesture
+    /// session's "committed a swipe" state: a press that committed a direction
+    /// must not also fire its click slot.
+    chorded: bool,
     /// The finger contact in progress, if the crown reports touch phases.
     contact: Option<Contact>,
 }
@@ -284,6 +289,7 @@ impl CrownTranslator {
             slots_per_detent,
             residue: 0,
             pressed: false,
+            chorded: false,
             contact: None,
         }
     }
@@ -313,28 +319,71 @@ impl CrownTranslator {
         }
 
         let steps = self.rotation_steps(sample);
-        let direction = if steps > 0 {
-            ButtonId::CrownRotateUp
-        } else {
-            ButtonId::CrownRotateDown
-        };
-        for _ in 0..steps.abs() {
-            out.push(CapturedInput::ButtonPulse(direction));
+
+        // The press-down edge comes first, before any rotation this packet
+        // carries. A chord direction is dispatched *against the live press*
+        // (the agent looks up the press's lifecycle token, exactly as it does
+        // for a raw-XY swipe), so a packet that both starts the press and
+        // turns would otherwise have its first detent dropped for want of a
+        // token. `Press` is the physical transition; the `*Active` states are
+        // the firmware repeating "still held" and must not re-fire a down
+        // edge.
+        if matches!(sample.button, ButtonState::Press | ButtonState::LongPress) && !self.pressed {
+            self.pressed = true;
+            // A chord is judged over one press, so the verdict resets with the
+            // press rather than with the packet.
+            self.chorded = false;
+            out.push(CapturedInput::ButtonDown(ButtonId::CrownPress));
         }
 
-        // Press edges. `Press` is the physical transition; the `*Active`
-        // states are the firmware repeating "still held", which must not
-        // re-fire a down edge.
-        match sample.button {
-            ButtonState::Press | ButtonState::LongPress if !self.pressed => {
-                self.pressed = true;
-                out.push(CapturedInput::ButtonDown(ButtonId::CrownPress));
+        // Rotation while the button is held is a *chord*, not plain rotation:
+        // it reports as the press's gesture direction, exactly as a raw-XY
+        // gesture button reports a swipe. `button_involved` rather than
+        // `self.pressed` so the packet that *ends* the press still counts —
+        // the finger is on the button either way, and the alternative is a
+        // chord whose last detent leaks out as volume.
+        //
+        // Nothing here consults a binding: an unbound chord falls back to the
+        // ordinary rotation action in the agent, the only layer that knows what
+        // is bound. That keeps this translator clock- and config-free, and so
+        // keeps `openlogi-device` host-portable.
+        if steps != 0 && button_involved {
+            self.chorded = true;
+            let direction = if steps > 0 {
+                GestureDirection::Up
+            } else {
+                GestureDirection::Down
+            };
+            for _ in 0..steps.abs() {
+                out.push(CapturedInput::Gesture(ButtonId::CrownPress, direction));
             }
-            ButtonState::Release | ButtonState::Inactive if self.pressed => {
-                self.pressed = false;
-                out.push(CapturedInput::ButtonUp(ButtonId::CrownPress));
+        } else {
+            let direction = if steps > 0 {
+                ButtonId::CrownRotateUp
+            } else {
+                ButtonId::CrownRotateDown
+            };
+            for _ in 0..steps.abs() {
+                out.push(CapturedInput::ButtonPulse(direction));
             }
-            _ => {}
+        }
+
+        // The release edge, after this packet's rotation has had its say about
+        // whether the press was a chord.
+        if matches!(sample.button, ButtonState::Release | ButtonState::Inactive) && self.pressed {
+            self.pressed = false;
+            out.push(CapturedInput::ButtonUp(ButtonId::CrownPress));
+            // The click slot, on the same terms the raw-XY gesture session
+            // uses: a press that never committed a direction was a plain
+            // click. A chorded press has already dispatched its directions and
+            // must not also fire the click.
+            if !self.chorded {
+                out.push(CapturedInput::Gesture(
+                    ButtonId::CrownPress,
+                    GestureDirection::Click,
+                ));
+            }
+            self.chorded = false;
         }
 
         // The tap decision. A tap is the *absence* of everything else during
@@ -535,7 +584,12 @@ mod tests {
                 button: ButtonState::Release,
                 ..idle()
             }),
-            vec![CapturedInput::ButtonUp(ButtonId::CrownPress)]
+            vec![
+                CapturedInput::ButtonUp(ButtonId::CrownPress),
+                // Nothing was turned while held, so the press was a plain
+                // click and reports as the crown press's click slot.
+                CapturedInput::Gesture(ButtonId::CrownPress, GestureDirection::Click),
+            ]
         );
         // And no second up edge once released.
         assert!(t.sample(idle()).is_empty());
@@ -559,7 +613,12 @@ mod tests {
                 button: ButtonState::Release,
                 ..idle()
             }),
-            vec![CapturedInput::ButtonUp(ButtonId::CrownPress)]
+            vec![
+                CapturedInput::ButtonUp(ButtonId::CrownPress),
+                // Nothing was turned while held, so the press was a plain
+                // click and reports as the crown press's click slot.
+                CapturedInput::Gesture(ButtonId::CrownPress, GestureDirection::Click),
+            ]
         );
     }
 
@@ -576,8 +635,142 @@ mod tests {
                 button: ButtonState::ShortPressActive,
                 ..idle()
             }),
-            vec![CapturedInput::ButtonPulse(ButtonId::CrownRotateUp)],
-            "press-and-turn rotates without re-firing the press"
+            vec![CapturedInput::Gesture(
+                ButtonId::CrownPress,
+                GestureDirection::Up
+            )],
+            "press-and-turn reports the chord direction, not plain rotation"
+        );
+    }
+
+    /// A chord and a click are mutually exclusive over one press: once a
+    /// direction commits, the release must not also fire the click slot, or
+    /// press-and-turn would run the press action too.
+    #[test]
+    fn a_chorded_press_does_not_also_click() {
+        let mut t = CrownTranslator::new(8);
+        assert_eq!(
+            t.sample(CrownSample {
+                button: ButtonState::Press,
+                ..idle()
+            }),
+            vec![CapturedInput::ButtonDown(ButtonId::CrownPress)]
+        );
+        assert_eq!(
+            t.sample(CrownSample {
+                ratchets: 2,
+                button: ButtonState::ShortPressActive,
+                ..idle()
+            }),
+            vec![
+                CapturedInput::Gesture(ButtonId::CrownPress, GestureDirection::Up),
+                CapturedInput::Gesture(ButtonId::CrownPress, GestureDirection::Up),
+            ],
+            "each detent is its own direction"
+        );
+        assert_eq!(
+            t.sample(CrownSample {
+                button: ButtonState::Release,
+                ..idle()
+            }),
+            vec![CapturedInput::ButtonUp(ButtonId::CrownPress)],
+            "a press that turned has already acted — no click"
+        );
+    }
+
+    /// Turning the other way inside a held press is the other direction.
+    #[test]
+    fn turning_down_while_held_is_the_down_direction() {
+        let mut t = CrownTranslator::new(8);
+        let _ = t.sample(CrownSample {
+            button: ButtonState::Press,
+            ..idle()
+        });
+        assert_eq!(
+            t.sample(CrownSample {
+                ratchets: -1,
+                button: ButtonState::ShortPressActive,
+                ..idle()
+            }),
+            vec![CapturedInput::Gesture(
+                ButtonId::CrownPress,
+                GestureDirection::Down
+            )]
+        );
+    }
+
+    /// The detent that arrives in the same packet as the release is still part
+    /// of the chord — the finger is on the button either way, and letting it
+    /// out as plain rotation would leak a stray volume step at the end of
+    /// every press-and-turn.
+    #[test]
+    fn a_detent_in_the_release_packet_still_belongs_to_the_chord() {
+        let mut t = CrownTranslator::new(8);
+        let _ = t.sample(CrownSample {
+            button: ButtonState::Press,
+            ..idle()
+        });
+        assert_eq!(
+            t.sample(CrownSample {
+                ratchets: 1,
+                button: ButtonState::Release,
+                ..idle()
+            }),
+            vec![
+                CapturedInput::Gesture(ButtonId::CrownPress, GestureDirection::Up),
+                CapturedInput::ButtonUp(ButtonId::CrownPress),
+            ],
+            "the direction commits before the release, and suppresses the click"
+        );
+    }
+
+    /// Rotation with the button up is unchanged: plain rotation, so an
+    /// unpressed dial keeps doing volume exactly as before.
+    #[test]
+    fn rotation_without_the_button_is_still_plain_rotation() {
+        let mut t = CrownTranslator::new(8);
+        assert_eq!(
+            t.sample(CrownSample {
+                ratchets: 1,
+                ..idle()
+            }),
+            vec![CapturedInput::ButtonPulse(ButtonId::CrownRotateUp)]
+        );
+    }
+
+    /// A chord must not poison the next press: the verdict is per press, so a
+    /// bare press after a chorded one still clicks.
+    #[test]
+    fn a_press_after_a_chord_still_clicks() {
+        let mut t = CrownTranslator::new(8);
+        let _ = t.sample(CrownSample {
+            button: ButtonState::Press,
+            ..idle()
+        });
+        let _ = t.sample(CrownSample {
+            ratchets: 1,
+            button: ButtonState::ShortPressActive,
+            ..idle()
+        });
+        let _ = t.sample(CrownSample {
+            button: ButtonState::Release,
+            ..idle()
+        });
+
+        let _ = t.sample(CrownSample {
+            button: ButtonState::Press,
+            ..idle()
+        });
+        assert_eq!(
+            t.sample(CrownSample {
+                button: ButtonState::Release,
+                ..idle()
+            }),
+            vec![
+                CapturedInput::ButtonUp(ButtonId::CrownPress),
+                CapturedInput::Gesture(ButtonId::CrownPress, GestureDirection::Click),
+            ],
+            "the chord verdict resets with each press"
         );
     }
 
@@ -667,7 +860,12 @@ mod tests {
         });
         assert_eq!(
             released,
-            vec![CapturedInput::ButtonUp(ButtonId::CrownPress)]
+            vec![
+                CapturedInput::ButtonUp(ButtonId::CrownPress),
+                // Nothing was turned while held, so the press was a plain
+                // click and reports as the crown press's click slot.
+                CapturedInput::Gesture(ButtonId::CrownPress, GestureDirection::Click),
+            ]
         );
         assert!(
             t.sample(CrownSample {
@@ -818,7 +1016,12 @@ mod tests {
                 tap: true,
                 ..idle()
             }),
-            vec![CapturedInput::ButtonUp(ButtonId::CrownPress)],
+            vec![
+                CapturedInput::ButtonUp(ButtonId::CrownPress),
+                // Nothing was turned while held, so the press was a plain
+                // click and reports as the crown press's click slot.
+                CapturedInput::Gesture(ButtonId::CrownPress, GestureDirection::Click),
+            ],
             "a tap on release is the finger leaving"
         );
     }
@@ -855,8 +1058,10 @@ mod tests {
                 ..idle()
             }),
             vec![
-                CapturedInput::ButtonPulse(ButtonId::CrownRotateUp),
+                // The down edge first: the direction is dispatched against
+                // this press's lifecycle, so a token has to exist for it.
                 CapturedInput::ButtonDown(ButtonId::CrownPress),
+                CapturedInput::Gesture(ButtonId::CrownPress, GestureDirection::Up),
             ]
         );
     }

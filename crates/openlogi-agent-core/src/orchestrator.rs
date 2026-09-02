@@ -15,7 +15,7 @@ use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, RwLock};
 
 use openlogi_core::app::ForegroundApp;
-use openlogi_core::binding::{Action, Binding, ButtonId};
+use openlogi_core::binding::{Binding, ButtonId};
 use openlogi_core::bindings::{button_bindings_for, oshook_gestures_for};
 use openlogi_core::config::{Config, LightSettings, ScrollResolution};
 use openlogi_core::device::{
@@ -287,11 +287,11 @@ impl Orchestrator {
             Some(&dev.config_key),
             self.current_app.as_deref(),
         );
-        let is_bound = |button: &ButtonId| {
-            bindings.get(button).is_some_and(|binding| {
-                matches!(binding, Binding::LongPress(_)) || binding.click_action() != Action::None
-            })
-        };
+        // Any slot counts, not just the click: a crown press bound purely as a
+        // press-and-rotate chord has no click action, and reading it as unbound
+        // would leave the dial native with the chord silently dead.
+        let is_bound =
+            |button: &ButtonId| bindings.get(button).is_some_and(Binding::binds_anything);
         let keys: BTreeMap<u16, _> = KEYBOARD_KEY_CIDS
             .iter()
             .filter(|(_, button)| is_bound(button))

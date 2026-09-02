@@ -74,7 +74,24 @@ Common device fields are:
   press: it fires only for a finger contact in which *nothing else* happened,
   so pressing the dial, turning it, or resting a finger on it is never also a
   tap. Rotation dispatches one action per detent, capped per report so a fast
-  flick cannot fire an unbounded burst
+  flick cannot fire an unbounded burst.
+
+  **Press and rotate.** Giving `CrownPress` a gesture binding turns it into a
+  chord holder, the same shape a mouse's gesture button uses: `Up` and `Down`
+  are the two rotation directions *while the dial is held*, and `Click` is a
+  press that never turned. The firmware has no chord event — the host derives
+  it from the button state and rotation deltas that share one report, so it
+  needs no timer and adds no latency.
+
+  Two consequences follow from the shape. The click fires on *release* rather
+  than on press, because until the dial is released a turn is still free to
+  claim it; and a press that turned never fires its click. Rotation with the
+  button up is untouched, and a chord direction left unbound falls back to the
+  ordinary `CrownRotateUp`/`CrownRotateDown` action, so a held dial keeps doing
+  volume until the chord is actually configured. Gesture bindings are
+  device-global (like every gesture map), so a chord is not per-application,
+  and a crown mode that sets `press` replaces the chord for as long as that
+  mode is active
 - `crown_modes`: an ordered list of what the crown dial does, cycled by the
   `CycleCrownMode` action (bind it to `CrownTap`). Each mode names itself and
   sets any of `rotate_up`, `rotate_down`, `press`; a control a mode leaves
