@@ -86,6 +86,10 @@ pub(crate) fn run() {
             cx.new(|_| RingView::new(invocation(), commands, &live_session))
         }) {
             tracing::warn!(%error, "could not open the preview ring");
+        } else {
+            // The same native touch-up the real path applies, so the preview
+            // shows the window's actual shape.
+            platform::configure_windows();
         }
     });
 }

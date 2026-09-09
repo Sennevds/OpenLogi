@@ -25,9 +25,6 @@ pub(crate) const WINDOW_SIZE: f32 = 360.0;
 pub(crate) const SLOT_SIZE: f32 = 54.0;
 pub(crate) const RADIUS: f32 = 122.0;
 
-/// Inset of the panel inside the window, leaving room for the glyphs at the rim.
-const PANEL_INSET: f32 = 18.0;
-
 /// The ring's own neutral scale. It floats over whatever is on the desktop, so
 /// unlike the settings app it cannot take its surfaces from the OS appearance —
 /// it commits to a dark panel and rides its own contrast. Only the accent is
@@ -201,20 +198,23 @@ impl Render for RingView {
             .relative()
             .size_full()
             .child(
-                // One translucent disc with a rim hairline. Tried and rejected:
-                // a band drawn as a thick border, leaving the centre a hole.
-                // Without a backdrop blur the hole just frames whatever is
-                // behind it, which reads as a washer rather than as glass.
+                // One translucent disc, filling the window edge to edge: the
+                // window is clipped to the same circle (see
+                // `platform::configure_windows`), so an inset would only leave
+                // a rim of bare backdrop around the dial. No drop shadow for
+                // the same reason — it would fall outside the clip and be cut
+                // away, and inside it would just darken the rim.
+                //
+                // Tried and rejected: a band drawn as a thick border, leaving
+                // the centre a hole. Without a backdrop blur the hole just
+                // frames whatever is behind it, which reads as a washer.
                 div()
                     .absolute()
-                    .left(px(PANEL_INSET))
-                    .top(px(PANEL_INSET))
-                    .size(px(WINDOW_SIZE - PANEL_INSET * 2.0))
+                    .inset_0()
                     .rounded_full()
                     .bg(PANEL)
                     .border_1()
-                    .border_color(PANEL_EDGE)
-                    .shadow_lg(),
+                    .border_color(PANEL_EDGE),
             )
             .children(slots)
             .child(
