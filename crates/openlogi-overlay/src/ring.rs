@@ -25,13 +25,36 @@ pub(crate) const WINDOW_SIZE: f32 = 360.0;
 pub(crate) const SLOT_SIZE: f32 = 54.0;
 pub(crate) const RADIUS: f32 = 122.0;
 
+/// Inset of the panel inside the window, leaving room for the glyphs at the rim.
+const PANEL_INSET: f32 = 18.0;
+
 /// The ring's own neutral scale. It floats over whatever is on the desktop, so
 /// unlike the settings app it cannot take its surfaces from the OS appearance —
 /// it commits to a dark panel and rides its own contrast. Only the accent is
 /// shared (`openlogi_ui::color`); these greys are local by nature.
-const PANEL: Hsla = neutral(0.06, 0.82);
-const SLOT_RESTING: Hsla = neutral(0.16, 0.98);
-const CANCEL_RESTING: Hsla = neutral(0.20, 0.98);
+///
+/// The panel is a *band*, not a disc (see [`BAND`]), and it is deliberately
+/// translucent: the ring appears over whatever the user was looking at, and an
+/// opaque black plate reads as a modal dialog rather than a transient overlay.
+/// The lightness is lifted off black at the same time — a near-black fill at
+/// partial alpha just muddies what is behind it, where a lighter grey reads as
+/// glass. Every glyph and chip above it keeps its own contrast, so the band can
+/// afford to be quiet.
+const PANEL: Hsla = neutral(0.06, 0.58);
+/// Hairline around the rim, so the panel keeps an edge on a busy desktop where
+/// alpha alone would let it dissolve.
+const PANEL_EDGE: Hsla = neutral(0.92, 0.20);
+/// A resting slot has **no** chip: its glyph sits directly on the band. Eight
+/// filled bubbles read as blobs over a translucent panel — they were the whole
+/// reason the ring looked heavy — and they are also redundant, because the band
+/// already supplies the glyphs' contrast. Only the hovered slot gets a fill.
+const SLOT_RESTING: Hsla = neutral(0.0, 0.0);
+/// The hovered slot's disc, in accent — see [`SELECTED_FILL_L`].
+const SLOT_HOVER_ALPHA: f32 = 0.85;
+/// The centre cancel target, kept quiet: it is the ring's escape hatch, not one
+/// of its actions. Quiet, but not invisible — at 14% it disappeared into the
+/// panel entirely, and an escape hatch nobody can find is not one.
+const CANCEL_RESTING: Hsla = neutral(0.98, 0.24);
 const GLYPH: Hsla = neutral(0.98, 1.0);
 const LABEL: Hsla = neutral(0.94, 1.0);
 const CANCEL_GLYPH: Hsla = neutral(0.82, 1.0);
@@ -111,15 +134,20 @@ impl RingView {
                 .justify_center()
                 .rounded_full()
                 .bg(if selected {
-                    color::accent_at_lightness(SELECTED_FILL_L)
+                    let mut fill = color::accent_at_lightness(SELECTED_FILL_L);
+                    fill.a = SLOT_HOVER_ALPHA;
+                    fill
                 } else {
                     SLOT_RESTING
                 })
+                // Border and shadow ride with the fill: on a chip-less resting
+                // slot a shadow has nothing to cast from and renders as a
+                // smudge on the band.
                 .when(selected, |slot| {
                     slot.border_2()
                         .border_color(color::accent_at_lightness(SELECTED_BORDER_L))
+                        .shadow_md()
                 })
-                .shadow_md()
                 .text_color(GLYPH)
                 .cursor_pointer()
                 .child(svg().path(icon_path).size(px(22.0)).text_color(GLYPH))
@@ -174,13 +202,19 @@ impl Render for RingView {
             .relative()
             .size_full()
             .child(
+                // One translucent disc with a rim hairline. Tried and rejected:
+                // a band drawn as a thick border, leaving the centre a hole.
+                // Without a backdrop blur the hole just frames whatever is
+                // behind it, which reads as a washer rather than as glass.
                 div()
                     .absolute()
-                    .left(px(18.0))
-                    .top(px(18.0))
-                    .size(px(WINDOW_SIZE - 36.0))
+                    .left(px(PANEL_INSET))
+                    .top(px(PANEL_INSET))
+                    .size(px(WINDOW_SIZE - PANEL_INSET * 2.0))
                     .rounded_full()
                     .bg(PANEL)
+                    .border_1()
+                    .border_color(PANEL_EDGE)
                     .shadow_lg(),
             )
             .children(slots)

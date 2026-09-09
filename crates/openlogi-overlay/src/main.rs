@@ -16,6 +16,7 @@ rust_i18n::i18n!("../openlogi-ui/locales", fallback = "en");
 
 mod agent;
 mod platform;
+mod preview;
 mod ring;
 mod session;
 
@@ -41,6 +42,12 @@ fn main() -> Result<()> {
         .init();
 
     openlogi_core::locale::activate(None);
+    // Preview mode short-circuits everything below: no IPC, no role tenancy,
+    // no agent. See `preview::run`.
+    if std::env::var_os("OPENLOGI_RING_PREVIEW").is_some() {
+        preview::run();
+        return Ok(());
+    }
     // Held for the whole run: dropping it hands the role to the replacement.
     let _tenancy = claim_the_role()?;
     let Ipc {
