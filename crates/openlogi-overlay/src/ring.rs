@@ -33,14 +33,13 @@ const PANEL_INSET: f32 = 18.0;
 /// it commits to a dark panel and rides its own contrast. Only the accent is
 /// shared (`openlogi_ui::color`); these greys are local by nature.
 ///
-/// The panel is a *band*, not a disc (see [`BAND`]), and it is deliberately
-/// translucent: the ring appears over whatever the user was looking at, and an
+/// The panel is deliberately translucent: the ring appears over whatever the user was looking at, and an
 /// opaque black plate reads as a modal dialog rather than a transient overlay.
 /// The lightness is lifted off black at the same time — a near-black fill at
 /// partial alpha just muddies what is behind it, where a lighter grey reads as
 /// glass. Every glyph and chip above it keeps its own contrast, so the band can
 /// afford to be quiet.
-const PANEL: Hsla = neutral(0.06, 0.58);
+const PANEL: Hsla = neutral(0.06, 0.50);
 /// Hairline around the rim, so the panel keeps an edge on a busy desktop where
 /// alpha alone would let it dissolve.
 const PANEL_EDGE: Hsla = neutral(0.92, 0.20);
@@ -321,7 +320,14 @@ pub(crate) fn ring_window_options(cx: &mut gpui::App) -> WindowOptions {
         is_resizable: false,
         is_minimizable: false,
         display_id,
-        window_background: WindowBackgroundAppearance::Transparent,
+        // `Blurred`, not `Transparent`. On Windows GPUI maps `Transparent` to
+        // accent state 2 with a *null* gradient colour, which paints an
+        // undefined — in practice whitish — veil over the whole window rect:
+        // the "square around the circle". `Blurred` is accent state 4,
+        // acrylic blur-behind with a `(0,0,0,0)` gradient, so nothing tints the
+        // rect and the backdrop is genuinely see-through. On macOS it inserts
+        // an `NSVisualEffectView`, which is the same intent natively.
+        window_background: WindowBackgroundAppearance::Blurred,
         app_id: Some("openlogi-action-ring".to_string()),
         ..WindowOptions::default()
     }
