@@ -24,7 +24,7 @@ use hidpp::{
         CreatableFeature, EmittingFeature,
         crown::{
             ActivityState, ButtonState, CrownEvent, CrownFeature, CrownGesture, CrownUpdate,
-            RatchetMode, ReportingMode, SetCrownMode,
+            ReportingMode, SetCrownMode,
         },
     },
 };
@@ -91,15 +91,15 @@ impl CrownCapture {
 
         // Divert rotation to HID++ and leave every other setting alone: the
         // ratchet mode and the three timeouts are the user's (or the
-        // firmware's) business, and `NoChange`/`0` are the wire sentinels for
-        // "don't touch" — see `SetCrownMode`.
+        // firmware's) business, and `None` is how `SetCrownMode` says
+        // "don't touch" — the encoder owns the wire sentinel.
         feature
             .set_mode(SetCrownMode {
-                diverting: ReportingMode::Diverted,
-                ratchet_mode: RatchetMode::NoChange,
-                rotation_timeout: 0,
-                short_long_timeout: 0,
-                double_tap_speed: 0,
+                diverting: Some(ReportingMode::Diverted),
+                ratchet_mode: None,
+                rotation_timeout: None,
+                short_long_timeout: None,
+                double_tap_speed: None,
             })
             .await
             .map_err(|e| GestureError::Hidpp(format!("crown divert failed: {e:?}")))?;
@@ -144,11 +144,11 @@ impl CrownCapture {
         if let Err(e) = self
             .feature
             .set_mode(SetCrownMode {
-                diverting: ReportingMode::Diverted,
-                ratchet_mode: RatchetMode::NoChange,
-                rotation_timeout: 0,
-                short_long_timeout: 0,
-                double_tap_speed: 0,
+                diverting: Some(ReportingMode::Diverted),
+                ratchet_mode: None,
+                rotation_timeout: None,
+                short_long_timeout: None,
+                double_tap_speed: None,
             })
             .await
         {
@@ -161,15 +161,14 @@ impl CrownCapture {
         let result = self
             .feature
             .set_mode(SetCrownMode {
-                diverting: ReportingMode::Hid,
-                ratchet_mode: RatchetMode::NoChange,
-                rotation_timeout: 0,
-                short_long_timeout: 0,
-                double_tap_speed: 0,
+                diverting: Some(ReportingMode::Hid),
+                ratchet_mode: None,
+                rotation_timeout: None,
+                short_long_timeout: None,
+                double_tap_speed: None,
             })
-            .await
-            .map(|_| ());
-        super::gesture::restore(result.map_err(|e| format!("{e:?}")), "crown");
+            .await;
+        super::capture_restore::restore_result(result.map_err(|e| format!("{e:?}")), "crown");
     }
 }
 

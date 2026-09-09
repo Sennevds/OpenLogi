@@ -146,7 +146,7 @@ impl CrownPanel {
         let in_app_profile =
             AppState::try_read(cx).is_some_and(|state| state.editing_app().is_some());
         picker_card(
-            tr!("Bind %{name}", name => tr!(button.label()).to_string()),
+            tr!("actions.bind_control", name => tr!(button.label()).to_string()),
             rows,
             pal,
         )
@@ -162,7 +162,7 @@ impl CrownPanel {
                 control_button("crown-use-default")
                     .w_full()
                     .icon(IconName::Undo)
-                    .label(tr!("Use the default profile"))
+                    .label(tr!("profiles.use_the_default_profile"))
                     .on_click(move |_event, _window, cx| {
                         AppState::update_bindings(cx, |state| {
                             state.clear_app_binding(button);
@@ -202,7 +202,7 @@ impl CrownPanel {
 
         picker_card(
             tr!(
-                "%{mode}: bind %{name}",
+                "crown.mode_bind_control",
                 mode => mode.name.clone(),
                 name => tr!(control.label()).to_string(),
             ),
@@ -214,7 +214,7 @@ impl CrownPanel {
                 control_button("crown-mode-fall-through")
                     .w_full()
                     .icon(IconName::Undo)
-                    .label(tr!("Use the control's own binding"))
+                    .label(tr!("crown.use_controls_own_binding"))
                     .on_click(move |_event, _window, cx| {
                         AppState::update_bindings(cx, |state| {
                             state.commit_crown_mode_action(index, control, None);
@@ -249,7 +249,7 @@ impl CrownPanel {
 
         let rows = action_rows("crown-chord-action", current.as_ref(), &on_pick, pal);
         picker_card(
-            tr!("Press and rotate: %{name}", name => chord::slot_caption(direction)),
+            tr!("crown.press_and_rotate_slot", name => chord::slot_caption(direction)),
             rows,
             pal,
         )
@@ -272,12 +272,12 @@ impl CrownPanel {
         let for_commit = input.clone();
         compact_panel(pal)
             .w(px(PANEL_W))
-            .child(editor_section(tr!("Mode name"), pal))
+            .child(editor_section(tr!("crown.mode_name"), pal))
             .child(
                 v_flex().p_2().gap_2().child(control_input(&input)).child(
                     control_button("crown-mode-name-save")
                         .w_full()
-                        .label(tr!("Save"))
+                        .label(tr!("common.save"))
                         .on_click(move |_event, _window, cx| {
                             let name = for_commit.read(cx).value().to_string();
                             AppState::update_bindings(cx, |state| {
@@ -312,7 +312,7 @@ impl CrownPanel {
                 })
             })
             .clone();
-        localize_placeholder(&input, tr!("Volume, Zoom, Tabs…"), window, cx);
+        localize_placeholder(&input, tr!("crown.mode_name_placeholder"), window, cx);
         input
     }
 }
@@ -382,13 +382,7 @@ impl Render for CrownPanel {
         v_flex()
             .gap_3()
             .w_full()
-            .child(
-                section_label(
-                    tr!("Unbound controls keep the dial's volume function."),
-                    pal,
-                )
-                .w_full(),
-            )
+            .child(section_label(tr!("crown.unbound_controls_keep_volume"), pal).w_full())
             .child(
                 h_flex()
                     .gap_4()
@@ -477,7 +471,7 @@ fn control_row(
     let action_label = if bound {
         localized_action_label(&slot.action)
     } else {
-        tr!("Off")
+        tr!("common.off")
     };
     // Keyed by the control itself, not the row position, so the list can be
     // reordered without moving focus between controls.

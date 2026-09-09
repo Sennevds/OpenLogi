@@ -10,9 +10,11 @@ use std::sync::{Arc, Mutex, mpsc};
 use std::thread;
 
 use windows_sys::Win32::Foundation::{CloseHandle, GetLastError, LPARAM, LRESULT, POINT, WPARAM};
+use windows_sys::Win32::Graphics::Gdi::{MONITOR_DEFAULTTONEAREST, MonitorFromPoint};
 use windows_sys::Win32::System::Threading::{
     GetCurrentThreadId, OpenProcess, PROCESS_QUERY_LIMITED_INFORMATION, QueryFullProcessImageNameW,
 };
+use windows_sys::Win32::UI::HiDpi::{GetDpiForMonitor, MDT_EFFECTIVE_DPI};
 use windows_sys::Win32::UI::Input::KeyboardAndMouse::{
     GetAsyncKeyState, VIRTUAL_KEY, VK_CONTROL, VK_ESCAPE, VK_F1, VK_LWIN, VK_MENU, VK_RWIN,
     VK_SHIFT,
@@ -21,16 +23,19 @@ use windows_sys::Win32::UI::WindowsAndMessaging::{
     CallNextHookEx, DispatchMessageW, GetCursorPos, GetForegroundWindow, GetMessageW,
     GetWindowThreadProcessId, HC_ACTION, KBDLLHOOKSTRUCT, LLKHF_INJECTED, LLMHF_INJECTED, MSG,
     MSLLHOOKSTRUCT, PM_NOREMOVE, PeekMessageW, PostThreadMessageW, SetWindowsHookExW,
-    TranslateMessage, UnhookWindowsHookEx, WH_KEYBOARD_LL, WH_MOUSE_LL, WM_KEYDOWN, WM_KEYUP,
-    WM_LBUTTONDOWN, WM_LBUTTONUP, WM_MBUTTONDOWN, WM_MBUTTONUP, WM_MOUSEHWHEEL, WM_MOUSEMOVE,
-    WM_MOUSEWHEEL, WM_QUIT, WM_RBUTTONDOWN, WM_RBUTTONUP, WM_SYSKEYDOWN, WM_SYSKEYUP, WM_USER,
-    WM_XBUTTONDOWN, WM_XBUTTONUP, XBUTTON1, XBUTTON2,
+    TranslateMessage, USER_DEFAULT_SCREEN_DPI, UnhookWindowsHookEx, WH_KEYBOARD_LL, WH_MOUSE_LL,
+    WM_KEYDOWN, WM_KEYUP, WM_LBUTTONDOWN, WM_LBUTTONUP, WM_MBUTTONDOWN, WM_MBUTTONUP,
+    WM_MOUSEHWHEEL, WM_MOUSEMOVE, WM_MOUSEWHEEL, WM_QUIT, WM_RBUTTONDOWN, WM_RBUTTONUP,
+    WM_SYSKEYDOWN, WM_SYSKEYUP, WM_USER, WM_XBUTTONDOWN, WM_XBUTTONUP, XBUTTON1, XBUTTON2,
 };
 
+use crate::windows_worker::{WorkerEvent, WorkerPhase, WorkerStatus};
 use crate::{
     ButtonId, CursorPosition, EventDisposition, ForegroundApp, HookBackend, HookError, HookEvent,
     KeyEvent, KeyModifiers, MouseEvent, ScrollDelta,
 };
+
+pub(crate) mod foreground;
 
 const WHEEL_DELTA: f64 = 120.0;
 
@@ -53,6 +58,7 @@ static CALLBACK: Mutex<Option<HookCallback>> = Mutex::new(None);
 pub(crate) struct HookInner {
     thread_id: u32,
     join: Option<thread::JoinHandle<()>>,
+    worker: Arc<WorkerStatus>,
 }
 
 /// The Windows backend: `WH_MOUSE_LL` / `WH_KEYBOARD_LL` hooks on a thread
@@ -67,9 +73,11 @@ impl HookBackend for Backend {
     ) -> Result<HookInner, HookError> {
         let callback: HookCallback = Arc::new(cb);
         let (ready_tx, ready_rx) = mpsc::channel();
+        let worker = Arc::new(WorkerStatus::new());
+        let thread_worker = Arc::clone(&worker);
         let join = thread::Builder::new()
             .name("openlogi-windows-hook".into())
-            .spawn(move || hook_thread(callback, ready_tx))
+            .spawn(move || hook_thread(callback, ready_tx, &thread_worker))
             .map_err(|e| HookError::WindowsHook(format!("could not spawn hook thread: {e}")))?;
 
         match ready_rx
@@ -79,6 +87,7 @@ impl HookBackend for Backend {
             Ok(thread_id) => Ok(HookInner {
                 thread_id,
                 join: Some(join),
+                worker,
             }),
             Err(e) => {
                 let _ = join.join();
@@ -88,21 +97,28 @@ impl HookBackend for Backend {
     }
 
     fn stop(mut inner: HookInner) {
-        // SAFETY: PostThreadMessageW takes the target thread id and the message by
-        // value (no pointers); `thread_id` was returned by the hook thread's own
-        // GetCurrentThreadId, so it names a real thread with a message queue.
-        let posted = unsafe { PostThreadMessageW(inner.thread_id, WM_QUIT, 0, 0) };
-        if posted == 0 {
-            // SAFETY: GetLastError reads the calling thread's last-error code and
-            // has no preconditions.
-            let err = unsafe { GetLastError() };
-            tracing::warn!(error = err, "could not post WM_QUIT to Windows hook thread");
+        let previous = inner.worker.transition(WorkerEvent::StopRequested);
+        if previous == WorkerPhase::Running {
+            // SAFETY: PostThreadMessageW takes the target thread id and the message by
+            // value (no pointers); `thread_id` was returned by the hook thread's own
+            // GetCurrentThreadId, so it names a real thread with a message queue.
+            let posted = unsafe { PostThreadMessageW(inner.thread_id, WM_QUIT, 0, 0) };
+            if posted == 0 {
+                // SAFETY: GetLastError reads the calling thread's last-error code and
+                // has no preconditions.
+                let err = unsafe { GetLastError() };
+                tracing::warn!(error = err, "could not post WM_QUIT to Windows hook thread");
+            }
         }
         if let Some(join) = inner.join.take()
             && let Err(e) = join.join()
         {
             tracing::warn!(?e, "Windows hook thread panicked while stopping");
         }
+    }
+
+    fn is_running(inner: &HookInner) -> bool {
+        inner.worker.phase().is_running()
     }
 
     #[expect(
@@ -169,9 +185,34 @@ impl HookBackend for Backend {
         if unsafe { GetCursorPos(&raw mut point) } == 0 {
             return None;
         }
+        // `GetCursorPos` reports physical pixels, but every consumer of
+        // `CursorPosition` (currently the overlay, matching cursor against
+        // GPUI's own display bounds) works in DIPs — GPUI's Windows backend
+        // divides every display and window bounds by the monitor's DPI scale.
+        // Left un-normalized, the ring drifts away from the cursor by exactly
+        // the scale factor on any monitor above 100% scaling.
+        // SAFETY: `MonitorFromPoint` takes `point` by value and never fails —
+        // `MONITOR_DEFAULTTONEAREST` guarantees a valid `HMONITOR` even when
+        // `point` sits outside every monitor.
+        let monitor = unsafe { MonitorFromPoint(point, MONITOR_DEFAULTTONEAREST) };
+        let mut dpi_x = 0u32;
+        let mut dpi_y = 0u32;
+        // SAFETY: `monitor` is a valid `HMONITOR` from `MonitorFromPoint` above;
+        // `dpi_x`/`dpi_y` are valid writable `u32`s for the duration of the call.
+        // The HRESULT is checked below rather than trusted, since MSDN leaves
+        // the out-params unspecified (not necessarily untouched) on failure.
+        let hr =
+            unsafe { GetDpiForMonitor(monitor, MDT_EFFECTIVE_DPI, &raw mut dpi_x, &raw mut dpi_y) };
+        let (dpi_x, dpi_y) = if hr >= 0 && dpi_x > 0 && dpi_y > 0 {
+            (dpi_x, dpi_y)
+        } else {
+            (USER_DEFAULT_SCREEN_DPI, USER_DEFAULT_SCREEN_DPI)
+        };
+        let scale_x = f64::from(dpi_x) / f64::from(USER_DEFAULT_SCREEN_DPI);
+        let scale_y = f64::from(dpi_y) / f64::from(USER_DEFAULT_SCREEN_DPI);
         Some(CursorPosition {
-            x: f64::from(point.x),
-            y: f64::from(point.y),
+            x: f64::from(point.x) / scale_x,
+            y: f64::from(point.y) / scale_y,
         })
     }
 }
@@ -180,7 +221,11 @@ impl HookBackend for Backend {
     clippy::needless_pass_by_value,
     reason = "callback and ready are moved into the thread's hook state and channel"
 )]
-fn hook_thread(callback: HookCallback, ready: mpsc::Sender<Result<u32, HookError>>) {
+fn hook_thread(
+    callback: HookCallback,
+    ready: mpsc::Sender<Result<u32, HookError>>,
+    worker: &WorkerStatus,
+) {
     match CALLBACK.lock() {
         Ok(mut slot) if slot.is_none() => {
             *slot = Some(callback);
@@ -257,26 +302,56 @@ fn hook_thread(callback: HookCallback, ready: mpsc::Sender<Result<u32, HookError
         return;
     }
 
+    worker.transition(WorkerEvent::Started);
     let _ = ready.send(Ok(thread_id));
-    message_loop();
+    let exit = message_loop(|_| false);
 
+    let failure = match exit {
+        MessageLoopExit::Quit => {
+            worker.transition(WorkerEvent::MessageLoopQuit);
+            None
+        }
+        MessageLoopExit::Failed(error) => {
+            worker.transition(WorkerEvent::MessageLoopFailed);
+            Some(error)
+        }
+    };
+    // Clear callback ownership before unhooking so even a stray native call
+    // during teardown can only pass through.
+    clear_callback();
     // SAFETY: both handles are the live ones returned by SetWindowsHookExW,
     // each unhooked exactly once here as the thread exits.
     unsafe {
         UnhookWindowsHookEx(keyboard_hook);
         UnhookWindowsHookEx(mouse_hook);
     }
-    clear_callback();
+    if let Some(error) = failure {
+        tracing::error!(error, "Windows hook message loop failed");
+    }
 }
 
-fn message_loop() {
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum MessageLoopExit {
+    Quit,
+    Failed(u32),
+}
+
+fn message_loop(mut handle_thread_message: impl FnMut(&MSG) -> bool) -> MessageLoopExit {
     let mut msg = MSG::default();
     loop {
         // SAFETY: `msg` is a live, owned MSG; a null window handle retrieves
-        // messages for the calling thread. Returns <= 0 on WM_QUIT or error.
+        // messages for the calling thread. Returns 0 on WM_QUIT and -1 on error.
         let result = unsafe { GetMessageW(&raw mut msg, std::ptr::null_mut(), 0, 0) };
-        if result <= 0 {
-            break;
+        if result == 0 {
+            return MessageLoopExit::Quit;
+        }
+        if result < 0 {
+            // SAFETY: GetLastError reads the calling thread's last-error code
+            // immediately after the failed GetMessageW call.
+            return MessageLoopExit::Failed(unsafe { GetLastError() });
+        }
+        if handle_thread_message(&msg) {
+            continue;
         }
         // SAFETY: `msg` was just populated by GetMessageW and outlives the call.
         unsafe { TranslateMessage(&raw const msg) };

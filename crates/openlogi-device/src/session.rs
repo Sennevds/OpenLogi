@@ -9,6 +9,7 @@
 //! The Craft crown (`crown`) has no session of its own: it is armed inside
 //! [`keyboard`]'s, which already holds that keyboard's one channel.
 
+mod capture_restore;
 mod crown;
 pub mod gesture;
 pub mod host_switch;

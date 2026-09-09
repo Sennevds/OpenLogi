@@ -83,7 +83,7 @@ pub(super) fn modes_section(
                         .p_2()
                         .text_caption()
                         .text_color(pal.text_muted)
-                        .child(tr!("No modes yet — the dial uses the bindings above.")),
+                        .child(tr!("crown.no_modes_yet")),
                 ),
             )
         })
@@ -97,7 +97,7 @@ pub(super) fn modes_section(
                     control_button("crown-modes-own")
                         .w_full()
                         .icon(IconName::Plus)
-                        .label(tr!("Give this app its own modes"))
+                        .label(tr!("crown.give_this_app_its_own_modes"))
                         .on_click(|_event, _window, cx| {
                             AppState::update_bindings(cx, AppState::start_app_crown_modes);
                         }),
@@ -106,7 +106,7 @@ pub(super) fn modes_section(
                     control_button("crown-modes-copy")
                         .w_full()
                         .icon(IconName::Copy)
-                        .label(tr!("Copy the default modes"))
+                        .label(tr!("crown.copy_the_default_modes"))
                         .on_click(|_event, _window, cx| {
                             AppState::update_bindings(cx, AppState::copy_default_crown_modes);
                         }),
@@ -117,7 +117,7 @@ pub(super) fn modes_section(
                 control_button("crown-modes-use-default")
                     .w_full()
                     .icon(IconName::Undo)
-                    .label(tr!("Use the default profile's modes"))
+                    .label(tr!("crown.use_default_profile_modes"))
                     .on_click(|_event, _window, cx| {
                         AppState::update_bindings(cx, AppState::clear_app_crown_modes);
                     }),
@@ -131,16 +131,16 @@ fn heading(view: &ModesView<'_>, pal: Palette) -> gpui::Div {
     let unreachable = !view.modes.is_empty() && !view.cycles_modes;
     let inherited = !view.editable();
     let caption = if inherited {
-        tr!("This app cycles the default profile's modes.")
+        tr!("crown.this_app_cycles_default_modes")
     } else if unreachable {
-        tr!("Bind a control to Cycle Crown Mode to reach these.")
+        tr!("crown.bind_a_control_to_reach_modes")
     } else {
-        tr!("Cycled by whichever control runs Cycle Crown Mode.")
+        tr!("crown.cycled_by_cycle_mode_control")
     };
     v_flex()
         .w_full()
         .gap_0p5()
-        .child(section_label(tr!("Modes"), pal).w_full())
+        .child(section_label(tr!("crown.modes"), pal).w_full())
         .child(
             div()
                 .text_caption()
@@ -204,7 +204,7 @@ fn card_header(
             div()
                 .text_caption()
                 .text_color(pal.text_muted)
-                .child(tr!("Empty"))
+                .child(tr!("crown.empty"))
         }))
         .when(editable, |header| {
             header
@@ -251,7 +251,7 @@ fn mode_control_row(
     pal: Palette,
 ) -> MenuRow {
     let panel = panel.clone();
-    let label = action.map_or_else(|| tr!("Falls through"), localized_action_label);
+    let label = action.map_or_else(|| tr!("crown.falls_through"), localized_action_label);
     // Keyed by mode and control rather than row position, so adding a mode does
     // not move focus between existing rows.
     MenuRow::new((
@@ -311,11 +311,12 @@ fn add_mode_button() -> impl IntoElement {
     control_button("crown-mode-add")
         .w_full()
         .icon(IconName::Plus)
-        .label(tr!("Add mode"))
+        .label(tr!("crown.add_mode"))
         .on_click(|_event, _window, cx| {
             AppState::update_bindings(cx, |state| {
-                let name = state
-                    .next_crown_mode_name(|n| tr!("Mode %{n}", n => n.to_string()).to_string());
+                let name = state.next_crown_mode_name(|n| {
+                    tr!("crown.mode_default_name", n => n.to_string()).to_string()
+                });
                 state.add_crown_mode(name);
             });
         })

@@ -18,92 +18,117 @@ use std::time::Duration;
 
 use openlogi_core::binding::{Action, Binding, ButtonId, GestureDirection};
 use openlogi_hid::{
-    CaptureChannel, CapturedInput, ChannelRegistry, DeviceRoute, KeyboardCaptureTargets,
+    CaptureChannel, CaptureSessionOutcome, CapturedInput, ChannelRegistry, DeviceIoGate,
+    DeviceRoute, KeyboardCaptureTargets, PendingCaptureRestore,
     run_keyboard_capture_session_with_registry,
 };
-use tokio::sync::{mpsc, oneshot};
+use tokio::sync::{mpsc, oneshot, watch};
 use tracing::{debug, info, warn};
 
+use super::capture_session::{CaptureRecovery, CaptureSession, CaptureSlot, ReconcileAction};
 use crate::CrownModes;
-use crate::receiver_access::ReceiverAccess;
+use crate::receiver_access::{ReceiverAccess, ReceiverRequestState, SessionReceiverLease};
 use crate::runtime::{ActionDispatcher, HidppSessionId, PressToken};
 
 /// Everything the watcher needs to capture one keyboard: where it is, which
-/// controls to divert (only those carrying a real binding), and the per-key
-/// action map presses dispatch through. Rebuilt by the orchestrator on
+/// `0x1b04` controls to divert (only keys carrying a real binding), and the
+/// per-key action map presses dispatch through. Rebuilt by the orchestrator on
 /// config / inventory / foreground-app changes.
-#[derive(Clone)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct KeyboardSpec {
-    /// Live crown-mode state, consulted per event rather than snapshotted:
-    /// a tap changes the active mode without any config or inventory change,
-    /// so a value captured when this spec was built would be stale by the
-    /// time the very next rotation arrives.
-    pub crown_modes: Arc<RwLock<CrownModes>>,
-    /// Stable config key used to scope lifecycle cancellation and hardware
-    /// actions to this keyboard.
+    /// Current config namespace for actions from this keyboard. Settings
+    /// adoption may change it without cycling an unchanged hardware target.
     pub config_key: String,
     /// HID++ route of the keyboard.
     pub route: DeviceRoute,
-    /// The F-row controls and the crown to divert, for exactly the bound ones.
+    /// What to divert: the bound `0x1b04` keys, and whether the crown dial
+    /// goes with them.
     pub targets: KeyboardCaptureTargets,
     /// Effective per-key immediate or threshold map (per-app overlay applied).
     pub bindings: BTreeMap<ButtonId, Binding>,
 }
 
-/// Shared keyboard-capture spec, `None` when no online keyboard has bound
-/// keys. Written by the orchestrator, read by the watcher.
-pub type SharedKeyboardSpec = Arc<RwLock<Option<KeyboardSpec>>>;
+/// Read-only, lossless, coalescing view of the keyboard-capture spec.
+pub type SharedKeyboardSpec = watch::Receiver<Option<Arc<KeyboardSpec>>>;
 
 /// Capture identity excluding bindings, which may change without requiring a
-/// hardware session restart when the diverted control set stays the same.
-#[derive(Clone, PartialEq)]
+/// hardware session restart when the diverted key set stays the same.
+#[derive(Clone, PartialEq, Eq)]
 struct KeyboardTarget {
-    config_key: String,
     route: DeviceRoute,
     targets: KeyboardCaptureTargets,
 }
 
 impl KeyboardTarget {
-    fn for_spec(spec: KeyboardSpec) -> Self {
+    fn for_spec(spec: &KeyboardSpec) -> Self {
         Self {
-            config_key: spec.config_key,
-            route: spec.route,
-            targets: spec.targets,
+            route: spec.route.clone(),
+            targets: spec.targets.clone(),
         }
     }
-
-    fn matches(&self, spec: &KeyboardSpec) -> bool {
-        self.config_key == spec.config_key
-            && self.route == spec.route
-            && self.targets == spec.targets
-    }
 }
 
-struct RunningKeyboardSession {
-    id: HidppSessionId,
-    target: KeyboardTarget,
-    stop: oneshot::Sender<()>,
+#[derive(Clone, Debug, PartialEq, Eq)]
+struct KeyboardDispatchPlan {
+    config_key: String,
+    bindings: BTreeMap<ButtonId, Binding>,
 }
+type RunningKeyboardSession = CaptureSession<KeyboardTarget, KeyboardDispatchPlan>;
+type KeyboardSlot = CaptureSlot<KeyboardTarget, KeyboardDispatchPlan, PendingRestore>;
 
 struct KeyboardInput {
     session: HidppSessionId,
     input: CapturedInput,
 }
 
-/// How often to re-read the spec so a config edit, per-app overlay change, or
-/// keyboard reconnect re-points the capture session.
-const TARGET_POLL: Duration = Duration::from_secs(1);
+struct KeyboardDone {
+    session: HidppSessionId,
+    pending_restore: Option<PendingCaptureRestore>,
+}
+
+enum KeyboardSessionEvent {
+    Input(KeyboardInput),
+    Done(KeyboardDone),
+}
+
+struct PendingRestore {
+    token: PendingCaptureRestore,
+    retry_at: tokio::time::Instant,
+}
+
+struct KeyboardManagerState {
+    slot: Option<KeyboardSlot>,
+    dispatcher: ActionDispatcher,
+    /// Live crown-mode state, read per event rather than snapshotted: a tap
+    /// changes the active mode with no config or inventory change, so a value
+    /// captured when a spec was published would be stale by the very next
+    /// rotation.
+    crown_modes: Arc<RwLock<CrownModes>>,
+}
+
+struct KeyboardSessionChannels {
+    capture: CaptureChannel,
+    registry: ChannelRegistry,
+    device_io: DeviceIoGate,
+    events: mpsc::UnboundedSender<KeyboardSessionEvent>,
+}
+
+const RETRY_DELAY: Duration = Duration::from_secs(1);
 
 /// Spawn the keyboard-capture manager thread. It owns a current-thread tokio
 /// runtime that keeps one capture session pointed at the bound keyboard and
 /// dispatches each captured key press.
 pub fn spawn(
-    spec: SharedKeyboardSpec,
+    spec: &SharedKeyboardSpec,
     keyboard_channel: CaptureChannel,
     receiver_access: ReceiverAccess,
     registry: ChannelRegistry,
+    device_io: DeviceIoGate,
     dispatcher: ActionDispatcher,
+    crown_modes: Arc<RwLock<CrownModes>>,
 ) {
+    let spec = spec.clone();
+    let receiver_requests = receiver_access.subscribe_requests();
     thread::spawn(move || {
         let runtime = match tokio::runtime::Builder::new_current_thread()
             .enable_all()
@@ -115,16 +140,20 @@ pub fn spawn(
                 return;
             }
         };
-        runtime.block_on(manage(
+        runtime.block_on(manage(KeyboardWatcher {
             spec,
             keyboard_channel,
             receiver_access,
+            receiver_requests,
             registry,
+            device_io,
             dispatcher,
-        ));
+            crown_modes,
+        }));
     });
 }
 
+/// Route one accepted keyboard edge through the shared HID++ lifecycle.
 /// The crown press's live lifecycle token, while it is holding a chord.
 ///
 /// Press-and-rotate dispatches each detent *against the press*, the way a
@@ -135,17 +164,17 @@ pub fn spawn(
 #[derive(Default)]
 struct CrownChord(Option<PressToken>);
 
-/// Route one accepted keyboard edge through the shared HID++ lifecycle.
 fn dispatch_input(
     session: &HidppSessionId,
     input: CapturedInput,
-    spec: &KeyboardSpec,
+    plan: &KeyboardDispatchPlan,
     dispatcher: &ActionDispatcher,
+    crown_modes: &Arc<RwLock<CrownModes>>,
     chord: &mut CrownChord,
 ) {
     match input {
         CapturedInput::ButtonDown(button) => {
-            let effective = effective_binding(spec, button);
+            let effective = effective_binding(plan, crown_modes, button);
             // A crown press carrying a chord map owns its own click slot, so
             // nothing may fire on the down edge: the press is not yet
             // committed to being a click, and a turn is still free to claim
@@ -175,31 +204,40 @@ fn dispatch_input(
             }
         }
         CapturedInput::ButtonPulse(button) => {
-            let binding = effective_binding(spec, button);
+            let binding = effective_binding(plan, crown_modes, button);
             dispatcher.dispatch_hidpp_button_pulse(session, button, binding.as_ref());
         }
         CapturedInput::Gesture(button, direction) => {
-            dispatch_crown_chord(session, button, direction, spec, dispatcher, chord);
+            dispatch_crown_chord(
+                session,
+                button,
+                direction,
+                plan,
+                dispatcher,
+                crown_modes,
+                chord,
+            );
         }
-        CapturedInput::Scroll { .. } => {}
+        CapturedInput::Scroll { .. } | CapturedInput::ThumbwheelDirection { .. } => {}
     }
 }
 
 /// Dispatch one press-and-rotate direction, or fall back to plain rotation.
 ///
-/// The capture layer reports rotation-while-held as a direction unconditionally
-/// — it cannot see bindings. So an unbound chord is resolved *here*, back to
-/// the rotation control it would have been, which is what keeps a held dial
-/// doing volume for everyone who has not configured a chord.
+/// The capture layer reports rotation-while-held as a direction
+/// unconditionally — it cannot see bindings. So an unbound chord is resolved
+/// *here*, back to the rotation control it would have been, which is what keeps
+/// a held dial doing volume for everyone who has not configured a chord.
 fn dispatch_crown_chord(
     session: &HidppSessionId,
     button: ButtonId,
     direction: GestureDirection,
-    spec: &KeyboardSpec,
+    plan: &KeyboardDispatchPlan,
     dispatcher: &ActionDispatcher,
+    crown_modes: &Arc<RwLock<CrownModes>>,
     chord: &mut CrownChord,
 ) {
-    let action = effective_binding(spec, button)
+    let action = effective_binding(plan, crown_modes, button)
         .and_then(|binding| match binding {
             Binding::Gesture(map) => map.get(&direction).cloned(),
             Binding::Single(_) | Binding::LongPress(_) => None,
@@ -233,7 +271,7 @@ fn dispatch_crown_chord(
         debug!(?button, ?direction, "crown chord with no binding — ignored");
         return;
     };
-    let binding = effective_binding(spec, rotation);
+    let binding = effective_binding(plan, crown_modes, rotation);
     debug!(
         ?direction,
         ?rotation,
@@ -261,198 +299,473 @@ fn is_chord_binding(button: ButtonId, binding: Option<&Binding>) -> bool {
 
 /// The binding in force for `button`: the active crown mode's override first,
 /// then the profile's own.
-fn effective_binding(spec: &KeyboardSpec, button: ButtonId) -> Option<Binding> {
-    mode_binding(spec, button).or_else(|| spec.bindings.get(&button).cloned())
+fn effective_binding(
+    plan: &KeyboardDispatchPlan,
+    crown_modes: &Arc<RwLock<CrownModes>>,
+    button: ButtonId,
+) -> Option<Binding> {
+    mode_binding(plan, crown_modes, button).or_else(|| plan.bindings.get(&button).cloned())
 }
 
 /// The active crown mode's binding for `button`, if a mode claims it.
 ///
 /// `None` means "fall through to the ordinary binding": either this device has
 /// no modes, or the active mode leaves this control alone. A mode never claims
-/// the tap (see [`openlogi_core::binding::CrownMode::action_for`]), so
-/// whatever cycles modes keeps working in every mode.
-fn mode_binding(spec: &KeyboardSpec, button: ButtonId) -> Option<Binding> {
-    let modes = spec.crown_modes.read().ok()?;
-    let action = modes.action_for(Some(&spec.config_key), button)?;
+/// the tap (see [`openlogi_core::binding::CrownMode::action_for`]), so whatever
+/// cycles modes keeps working in every mode.
+fn mode_binding(
+    plan: &KeyboardDispatchPlan,
+    crown_modes: &Arc<RwLock<CrownModes>>,
+    button: ButtonId,
+) -> Option<Binding> {
+    let modes = crown_modes.read().ok()?;
+    let action = modes.action_for(Some(&plan.config_key), button)?;
     Some(Binding::Single(action.clone()))
 }
 
-/// Snapshot the keyboard session target unless pairing currently owns capture.
+/// Snapshot the keyboard capture target and dispatch plan unless pairing
+/// currently owns capture.
 fn wanted_session(
-    receiver_access: &ReceiverAccess,
-    spec: &SharedKeyboardSpec,
-) -> Option<KeyboardTarget> {
-    if receiver_access.exclusive_requested() {
+    requests: ReceiverRequestState,
+    spec: &watch::Receiver<Option<Arc<KeyboardSpec>>>,
+) -> Option<(KeyboardTarget, KeyboardDispatchPlan)> {
+    let published = spec.borrow();
+    wanted_session_for(requests, published.as_deref())
+}
+
+fn wanted_session_for(
+    requests: ReceiverRequestState,
+    spec: Option<&KeyboardSpec>,
+) -> Option<(KeyboardTarget, KeyboardDispatchPlan)> {
+    if requests.any() {
         return None;
     }
-    spec.read()
-        .ok()
-        .and_then(|guard| guard.clone())
-        .map(KeyboardTarget::for_spec)
+    spec.map(|spec| {
+        (
+            KeyboardTarget::for_spec(spec),
+            KeyboardDispatchPlan {
+                config_key: spec.config_key.clone(),
+                bindings: spec.bindings.clone(),
+            },
+        )
+    })
 }
 
-/// The long-lived channels and leases one capture session needs, grouped so
-/// starting a session stays one call rather than seven positional arguments.
-struct SessionPorts<'a> {
-    receiver_access: &'a ReceiverAccess,
-    keyboard_channel: &'a CaptureChannel,
-    registry: &'a ChannelRegistry,
-    /// Where captured inputs are forwarded, tagged with the session id.
-    inputs: &'a mpsc::UnboundedSender<KeyboardInput>,
-    /// Where the session announces its own completion.
-    done: &'a mpsc::UnboundedSender<HidppSessionId>,
+fn reconcile_session(
+    running: &mut RunningKeyboardSession,
+    wanted: Option<&(KeyboardTarget, KeyboardDispatchPlan)>,
+    dispatcher: &ActionDispatcher,
+) {
+    let desired = wanted.map(|(target, dispatch)| (target, dispatch));
+    let action = running.reconcile(desired);
+    if action != ReconcileAction::None {
+        dispatcher.cancel_hidpp_session(running.id());
+    }
+    if action == ReconcileAction::DispatchChanged {
+        let config_key = running.dispatch().config_key.clone();
+        running.rekey(&config_key);
+    }
 }
 
-/// Start one keyboard capture session for `target` at `epoch`.
-///
-/// `None` when the receiver lease is unavailable — pairing owns it, or the
-/// previous session has not let go yet — and the caller simply retries on its
-/// next tick.
-fn start_session(
+impl KeyboardManagerState {
+    fn new(dispatcher: ActionDispatcher, crown_modes: Arc<RwLock<CrownModes>>) -> Self {
+        Self {
+            slot: None,
+            dispatcher,
+            crown_modes,
+        }
+    }
+
+    fn deadline(
+        &self,
+        requests: ReceiverRequestState,
+        device_io_allowed: bool,
+    ) -> Option<tokio::time::Instant> {
+        next_deadline(requests, device_io_allowed, self.slot.as_ref())
+    }
+
+    fn expedite_pending_restore(&mut self) {
+        if let Some(pending) = self
+            .slot
+            .as_mut()
+            .and_then(KeyboardSlot::recovery_mut)
+            .and_then(|recovery| recovery.pending_restore.as_mut())
+        {
+            pending.retry_at = tokio::time::Instant::now();
+        }
+    }
+
+    fn has_pending_restore(&self) -> bool {
+        self.slot
+            .as_ref()
+            .and_then(KeyboardSlot::recovery)
+            .is_some_and(|recovery| recovery.pending_restore.is_some())
+    }
+
+    async fn reconcile(
+        &mut self,
+        requests: ReceiverRequestState,
+        device_io_allowed: bool,
+        published: bool,
+        wanted: Option<(KeyboardTarget, KeyboardDispatchPlan)>,
+        receiver_access: &ReceiverAccess,
+        channels: &KeyboardSessionChannels,
+    ) {
+        // Preserve the passive listener and diverted-key ownership across
+        // display sleep. Stopping or retrying it while suspended would issue
+        // the same proactive HID writes that can promote macOS DarkWake.
+        if !device_io_allowed {
+            return;
+        }
+        let now = tokio::time::Instant::now();
+        if !published
+            && let Some(recovery) = self.slot.as_mut().and_then(KeyboardSlot::recovery_mut)
+        {
+            recovery.restart_at = None;
+            if recovery.is_empty() {
+                self.slot = None;
+            }
+        }
+        if let Some(running) = self.slot.as_mut().and_then(KeyboardSlot::session_mut) {
+            reconcile_session(running, wanted.as_ref(), &self.dispatcher);
+            return;
+        }
+        if requests.any() {
+            return;
+        }
+
+        // Restoration remains mandatory when the spec disappears. A due
+        // retry hands its lease directly to a successor.
+        let mut handoff_lease = None;
+        let restore_due = self
+            .slot
+            .as_ref()
+            .and_then(KeyboardSlot::recovery)
+            .and_then(|recovery| recovery.pending_restore.as_ref())
+            .is_some_and(|pending| pending.retry_at <= now);
+        if restore_due && let Some(lease) = receiver_access.try_acquire_for_session() {
+            handoff_lease = Some(lease);
+            let Some(KeyboardSlot::Recovering(mut recovery)) = self.slot.take() else {
+                return;
+            };
+            let Some(pending) = recovery.pending_restore.take() else {
+                self.slot = Some(KeyboardSlot::Recovering(recovery));
+                return;
+            };
+            if let CaptureSessionOutcome::RestorePending(token) =
+                pending.token.retry(&channels.registry).await
+            {
+                recovery.pending_restore = Some(PendingRestore {
+                    token,
+                    retry_at: tokio::time::Instant::now() + RETRY_DELAY,
+                });
+            }
+            if !recovery.is_empty() {
+                self.slot = Some(KeyboardSlot::Recovering(recovery));
+            }
+        }
+        if self.slot.as_ref().is_some_and(|slot| match slot {
+            KeyboardSlot::Running(_) => true,
+            KeyboardSlot::Recovering(recovery) => {
+                recovery.pending_restore.is_some()
+                    || recovery.restart_at.is_some_and(|deadline| deadline > now)
+            }
+        }) {
+            return;
+        }
+        let Some((target, dispatch)) = wanted else {
+            return;
+        };
+        let receiver_lease = handoff_lease.or_else(|| receiver_access.try_acquire_for_session());
+        if let Some(receiver_lease) = receiver_lease {
+            self.slot = Some(KeyboardSlot::running(spawn_session(
+                target,
+                dispatch,
+                receiver_lease,
+                channels,
+            )));
+        } else {
+            self.slot = Some(KeyboardSlot::recovering(None, Some(now + RETRY_DELAY)));
+        }
+    }
+
+    fn handle_session_event(
+        &mut self,
+        event: KeyboardSessionEvent,
+        device_io_allowed: bool,
+        receiver_requests: &watch::Receiver<ReceiverRequestState>,
+        spec: &watch::Receiver<Option<Arc<KeyboardSpec>>>,
+        chord: &mut CrownChord,
+    ) -> bool {
+        match event {
+            KeyboardSessionEvent::Input(input) => {
+                if device_io_allowed {
+                    let wanted = wanted_session(*receiver_requests.borrow(), spec);
+                    if let Some(running) = self.slot.as_mut().and_then(KeyboardSlot::session_mut) {
+                        reconcile_session(running, wanted.as_ref(), &self.dispatcher);
+                    }
+                }
+
+                let Some(running) = self
+                    .slot
+                    .as_ref()
+                    .and_then(KeyboardSlot::session)
+                    .filter(|running| running.owns(&input.session))
+                else {
+                    self.dispatcher.cancel_hidpp_session(&input.session);
+                    debug!(
+                        epoch = input.session.epoch(),
+                        "input from a stale keyboard session — ignored"
+                    );
+                    return false;
+                };
+                dispatch_input(
+                    running.id(),
+                    input.input,
+                    running.dispatch(),
+                    &self.dispatcher,
+                    &self.crown_modes,
+                    chord,
+                );
+                false
+            }
+            KeyboardSessionEvent::Done(done) => {
+                // Input and Done share this queue, and the forwarding task is
+                // drained before Done is sent. A tracked draining session
+                // therefore remains the sole input owner until firmware
+                // restoration is complete.
+                let now = tokio::time::Instant::now();
+                let pending_restore = done.pending_restore.map(|token| PendingRestore {
+                    token,
+                    retry_at: now + RETRY_DELAY,
+                });
+                let restart_at = device_io_allowed.then_some(now + RETRY_DELAY);
+                let Some(slot) = self.slot.as_mut() else {
+                    return false;
+                };
+                let Some((dispatch_session, unexpected)) =
+                    slot.complete(&done.session, pending_restore, restart_at)
+                else {
+                    return false;
+                };
+                let recovery_finished = slot.recovery().is_some_and(CaptureRecovery::is_empty);
+                self.dispatcher.cancel_hidpp_session(&dispatch_session);
+                if unexpected && device_io_allowed {
+                    warn!("keyboard capture session ended unexpectedly, delaying re-arm");
+                }
+                if recovery_finished {
+                    self.slot = None;
+                }
+                true
+            }
+        }
+    }
+}
+
+fn next_deadline(
+    requests: ReceiverRequestState,
+    device_io_allowed: bool,
+    slot: Option<&KeyboardSlot>,
+) -> Option<tokio::time::Instant> {
+    if requests.any() || !device_io_allowed {
+        return None;
+    }
+    let recovery = slot.and_then(KeyboardSlot::recovery)?;
+    recovery
+        .pending_restore
+        .as_ref()
+        .map(|pending| pending.retry_at)
+        .into_iter()
+        .chain(recovery.restart_at)
+        .min()
+}
+
+/// Keep one keyboard capture session alive for the published spec, restarting
+/// it when the keyboard or its bound-key set changes, and dispatch incoming
+/// presses. Runs for the lifetime of the process.
+/// The handles one keyboard-watcher thread owns for the life of the process.
+struct KeyboardWatcher {
+    spec: watch::Receiver<Option<Arc<KeyboardSpec>>>,
+    keyboard_channel: CaptureChannel,
+    receiver_access: ReceiverAccess,
+    receiver_requests: watch::Receiver<ReceiverRequestState>,
+    registry: ChannelRegistry,
+    device_io: DeviceIoGate,
+    dispatcher: ActionDispatcher,
+    crown_modes: Arc<RwLock<CrownModes>>,
+}
+
+async fn manage(watcher: KeyboardWatcher) {
+    let KeyboardWatcher {
+        mut spec,
+        keyboard_channel,
+        receiver_access,
+        mut receiver_requests,
+        registry,
+        mut device_io,
+        dispatcher,
+        crown_modes,
+    } = watcher;
+    let (events, mut event_rx) = mpsc::unbounded_channel::<KeyboardSessionEvent>();
+    let mut registry_changes = registry.subscribe();
+    let channels = KeyboardSessionChannels {
+        capture: keyboard_channel,
+        registry,
+        device_io: device_io.clone(),
+        events,
+    };
+    let mut state = KeyboardManagerState::new(dispatcher, crown_modes);
+    // The crown press's chord hold. A local rather than manager state so the
+    // immutable `slot` borrow at dispatch and this mutable one stay disjoint.
+    let mut chord = CrownChord::default();
+    let mut reconcile = true;
+
+    loop {
+        if reconcile {
+            reconcile = false;
+            let device_io_allowed = device_io.allows_io();
+            if device_io_allowed {
+                let requests = *receiver_requests.borrow_and_update();
+                let published = spec.borrow_and_update().clone();
+                let want = wanted_session_for(requests, published.as_deref());
+                state
+                    .reconcile(
+                        requests,
+                        device_io_allowed,
+                        published.is_some(),
+                        want,
+                        &receiver_access,
+                        &channels,
+                    )
+                    .await;
+            }
+        }
+
+        let requests = *receiver_requests.borrow();
+        let deadline = state.deadline(requests, device_io.allows_io());
+        if deadline.is_some_and(|deadline| deadline <= tokio::time::Instant::now()) {
+            reconcile = true;
+            continue;
+        }
+
+        tokio::select! {
+            Some(event) = event_rx.recv() => {
+                reconcile |= state.handle_session_event(
+                    event,
+                    device_io.allows_io(),
+                    &receiver_requests,
+                    &spec,
+                    &mut chord,
+                );
+            }
+            result = spec.changed() => match result {
+                Ok(()) => reconcile = true,
+                Err(_) => return,
+            },
+            result = receiver_requests.changed() => match result {
+                Ok(()) => reconcile = true,
+                Err(_) => return,
+            },
+            allowed = device_io.changed() => match allowed {
+                Some(true) => reconcile = true,
+                Some(false) => {}
+                None => return,
+            },
+            open = wait_for_registry_change(
+                &mut registry_changes,
+                state.has_pending_restore(),
+            ) => {
+                if !open {
+                    return;
+                }
+                if device_io.allows_io() {
+                    state.expedite_pending_restore();
+                    reconcile = true;
+                }
+            }
+            () = wait_for_deadline(deadline) => {
+                reconcile = true;
+            }
+        }
+    }
+}
+
+async fn wait_for_deadline(deadline: Option<tokio::time::Instant>) {
+    if let Some(deadline) = deadline {
+        tokio::time::sleep_until(deadline).await;
+    } else {
+        std::future::pending::<()>().await;
+    }
+}
+
+async fn wait_for_registry_change(
+    changes: &mut watch::Receiver<()>,
+    has_pending_restore: bool,
+) -> bool {
+    if !has_pending_restore {
+        return std::future::pending().await;
+    }
+    changes.changed().await.is_ok()
+}
+
+fn spawn_session(
     target: KeyboardTarget,
-    epoch: u64,
-    ports: &SessionPorts<'_>,
-) -> Option<RunningKeyboardSession> {
-    let receiver_lease = ports.receiver_access.try_acquire_for_session()?;
+    dispatch: KeyboardDispatchPlan,
+    receiver_lease: SessionReceiverLease,
+    channels: &KeyboardSessionChannels,
+) -> RunningKeyboardSession {
     let (stop_tx, stop_rx) = oneshot::channel();
-    let slot = Arc::clone(ports.keyboard_channel);
-    let session_registry = ports.registry.clone();
-    let id = HidppSessionId::new(&target.config_key, epoch);
-
-    // Re-tag every input with this session's id, so a stale session's events
-    // are recognisable after it has been replaced.
+    let slot = Arc::clone(&channels.capture);
+    let session_registry = channels.registry.clone();
+    let id = HidppSessionId::new(&dispatch.config_key);
     let (sink, mut session_rx) = mpsc::unbounded_channel();
-    let forward = ports.inputs.clone();
+    let forward_events = channels.events.clone();
     let forward_id = id.clone();
-    tokio::spawn(async move {
+    let forward = tokio::spawn(async move {
         while let Some(input) = session_rx.recv().await {
-            let _ = forward.send(KeyboardInput {
+            let _ = forward_events.send(KeyboardSessionEvent::Input(KeyboardInput {
                 session: forward_id.clone(),
                 input,
-            });
+            }));
         }
     });
-
-    let done = ports.done.clone();
+    let session_events = channels.events.clone();
     let done_id = id.clone();
     let route = target.route.clone();
     let targets = target.targets.clone();
+    let device_io = channels.device_io.clone();
     tokio::spawn(async move {
-        // Held for the session's lifetime: dropping the lease here is what
-        // lets pairing take the receiver once capture stops.
         let _receiver_lease = receiver_lease;
-        if let Err(e) = run_keyboard_capture_session_with_registry(
+        let pending_restore = match run_keyboard_capture_session_with_registry(
             route,
             targets,
             sink,
             stop_rx,
             slot,
             &session_registry,
+            device_io,
         )
         .await
         {
-            debug!(error = %e, "keyboard capture session ended");
-        }
-        let _ = done.send(done_id);
+            Ok(CaptureSessionOutcome::Restored) => None,
+            Ok(CaptureSessionOutcome::RestorePending(pending)) => Some(pending),
+            Err(failure) => {
+                let (error, pending) = failure.into_parts();
+                debug!(%error, "keyboard capture session ended");
+                pending
+            }
+        };
+        // The device layer drops its listener only after restoration. Draining
+        // this forwarder before Done preserves every input accepted while
+        // diversion was still active ahead of the ownership boundary.
+        let _ = forward.await;
+        let _ = session_events.send(KeyboardSessionEvent::Done(KeyboardDone {
+            session: done_id,
+            pending_restore,
+        }));
     });
-
-    Some(RunningKeyboardSession {
-        id,
-        target,
-        stop: stop_tx,
-    })
+    CaptureSession::active(id, target, dispatch, stop_tx)
 }
 
-/// Keep one keyboard capture session alive for the published spec, restarting
-/// it when the keyboard or its bound-key set changes, and dispatch incoming
-/// presses. Runs for the lifetime of the process.
-async fn manage(
-    spec: SharedKeyboardSpec,
-    keyboard_channel: CaptureChannel,
-    receiver_access: ReceiverAccess,
-    registry: ChannelRegistry,
-    dispatcher: ActionDispatcher,
-) {
-    let (tx, mut rx) = mpsc::unbounded_channel::<KeyboardInput>();
-    let mut current: Option<RunningKeyboardSession> = None;
-    // The crown press's chord hold, reset whenever the press ends.
-    let mut chord = CrownChord::default();
-    let mut ticker = tokio::time::interval(TARGET_POLL);
-    // Sessions report completion tagged with their start epoch, so an
-    // unexpected exit of the *current* session re-arms while stale completions
-    // are ignored — same pacing/starvation reasoning as the gesture watcher.
-    let (done_tx, mut done_rx) = mpsc::unbounded_channel::<HidppSessionId>();
-    let mut epoch: u64 = 0;
-
-    loop {
-        tokio::select! {
-            Some(input) = rx.recv() => {
-                let Some(running) = current.as_ref() else {
-                    continue;
-                };
-                let live_spec = spec.read().ok().and_then(|guard| guard.clone());
-                let current_target = live_spec.as_ref().is_some_and(|live| running.target.matches(live));
-                if input.session != running.id
-                    || receiver_access.exclusive_requested()
-                    || !current_target
-                {
-                    dispatcher.cancel_hidpp_session(&input.session);
-                    debug!(epoch = input.session.epoch(), "input from a stale keyboard session — ignored");
-                    continue;
-                }
-                let Some(live_spec) = live_spec else {
-                    continue;
-                };
-                dispatch_input(
-                    &input.session,
-                    input.input,
-                    &live_spec,
-                    &dispatcher,
-                    &mut chord,
-                );
-            }
-            _ = ticker.tick() => {
-                // While pairing is waiting or active, release the capture
-                // session so run_pairing can own the receiver's HID node.
-                let want = wanted_session(&receiver_access, &spec);
-                if current
-                    .as_ref()
-                    .is_some_and(|running| Some(&running.target) == want.as_ref())
-                {
-                    continue;
-                }
-                // Spec changed (or first tick): stop the old session and start
-                // one for the new state. Sending on the oneshot lets the old
-                // session restore the diverted controls.
-                if let Some(running) = current.take() {
-                    dispatcher.cancel_hidpp_session(&running.id);
-                    let _ = running.stop.send(());
-                    continue;
-                }
-                if let Some(target) = want {
-                    epoch = epoch.wrapping_add(1);
-                    current = start_session(
-                        target,
-                        epoch,
-                        &SessionPorts {
-                            receiver_access: &receiver_access,
-                            keyboard_channel: &keyboard_channel,
-                            registry: &registry,
-                            inputs: &tx,
-                            done: &done_tx,
-                        },
-                    );
-                }
-            }
-            Some(done_session) = done_rx.recv() => {
-                // A capture session ended on its own; re-arm only the live one
-                // (see gesture watcher for the epoch/pacing rationale).
-                if current.as_ref().is_some_and(|running| running.id == done_session) {
-                    dispatcher.cancel_hidpp_session(&done_session);
-                    warn!("keyboard capture session ended unexpectedly, re-arming");
-                    current = None;
-                }
-            }
-        }
-    }
-}
+#[cfg(test)]
+mod tests;

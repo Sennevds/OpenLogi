@@ -45,10 +45,10 @@ pub(super) fn slot_caption(direction: GestureDirection) -> String {
 /// hence its own labels rather than [`GestureDirection`]'s swipe vocabulary.
 fn slot_label(direction: GestureDirection) -> gpui::SharedString {
     match direction {
-        GestureDirection::Up => tr!("Turn up while held"),
-        GestureDirection::Down => tr!("Turn down while held"),
-        GestureDirection::Click => tr!("Press without turning"),
-        GestureDirection::Left | GestureDirection::Right => tr!("Off"),
+        GestureDirection::Up => tr!("crown.turn_up_while_held"),
+        GestureDirection::Down => tr!("crown.turn_down_while_held"),
+        GestureDirection::Click => tr!("crown.press_without_turning"),
+        GestureDirection::Left | GestureDirection::Right => tr!("common.off"),
     }
 }
 
@@ -66,12 +66,12 @@ pub(super) fn chord_card(
             v_flex()
                 .w_full()
                 .gap_0p5()
-                .child(section_label(tr!("Press and rotate"), pal).w_full())
+                .child(section_label(tr!("crown.press_and_rotate"), pal).w_full())
                 .child(
                     div()
                         .text_caption()
                         .text_color(pal.text_muted)
-                        .child(tr!("Turning the dial while it is held runs these instead.")),
+                        .child(tr!("crown.press_and_rotate_description")),
                 ),
         )
         .child(
@@ -91,7 +91,7 @@ pub(super) fn chord_card(
             control_button("crown-chord-off")
                 .w_full()
                 .icon(IconName::Undo)
-                .label(tr!("Stop using press and rotate"))
+                .label(tr!("crown.stop_using_press_and_rotate"))
                 .on_click(|_event, _window, cx| {
                     AppState::update_bindings(cx, |state| {
                         state.commit_gesture_mode(ButtonId::CrownPress, false);
@@ -114,9 +114,9 @@ fn slot_row(
     // exist here, where there is no ordinary binding to fall through to.
     let bound = action.is_some_and(|action| *action != Action::None);
     let label = if bound {
-        action.map_or_else(|| tr!("Off"), localized_action_label)
+        action.map_or_else(|| tr!("common.off"), localized_action_label)
     } else {
-        tr!("Off")
+        tr!("common.off")
     };
     MenuRow::new(("crown-chord-slot", direction as usize))
         .selected(selected)
@@ -167,9 +167,7 @@ pub(super) fn enable_row(in_app_profile: bool, pal: Palette) -> gpui::Div {
                     .pb_1()
                     .text_caption()
                     .text_color(pal.text_muted)
-                    .child(tr!(
-                        "Press and rotate is set per device, not per application."
-                    )),
+                    .child(tr!("crown.press_and_rotate_per_device")),
             )
         })
         .when(!in_app_profile, |row| {
@@ -177,7 +175,7 @@ pub(super) fn enable_row(in_app_profile: bool, pal: Palette) -> gpui::Div {
                 control_button("crown-chord-on")
                     .w_full()
                     .icon(IconName::Plus)
-                    .label(tr!("Use press and rotate"))
+                    .label(tr!("crown.use_press_and_rotate"))
                     .on_click(|_event, _window, cx| {
                         AppState::update_bindings(cx, |state| {
                             state.commit_gesture_mode(ButtonId::CrownPress, true);
@@ -207,7 +205,7 @@ mod tests {
         for direction in CHORD_SLOTS {
             assert_ne!(
                 slot_label(direction),
-                tr!("Off"),
+                tr!("common.off"),
                 "{direction:?} falls through to the placeholder label"
             );
         }
