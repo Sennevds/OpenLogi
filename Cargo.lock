@@ -5713,6 +5713,7 @@ dependencies = [
  "openlogi-hook",
  "openlogi-ipc",
  "openlogi-ui",
+ "raw-window-handle",
  "rust-i18n",
  "succession",
  "tarpc",

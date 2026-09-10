@@ -48,6 +48,9 @@ block2 = { workspace = true }
 workspace = true
 
 [target.'cfg(target_os = "windows")'.dependencies]
+# The HWND behind GPUI's `Window`, to give it a circular region. Pinned to the
+# version gpui itself links, or the handle types would not be the same types.
+raw-window-handle = "0.6"
 # SetWindowRgn/CreateEllipticRgn: the ring is round but its window is a
 # rectangle, and GPUI has no API for a non-rectangular window.
 windows-sys = { workspace = true, features = [

@@ -74,6 +74,10 @@ pub(crate) struct RingView {
     invocation: ActionRingInvocation,
     commands: mpsc::UnboundedSender<OverlayCommand>,
     hovered: Option<ActionRingSlot>,
+    /// Whether this window has been given its circular region yet. The shape
+    /// is native and one-shot, and the first paint is the earliest point the
+    /// window is guaranteed to exist natively.
+    clipped: bool,
     /// Publishes click-away identity for exactly this view's lifetime.
     _showing: ShowingRing,
 }
@@ -90,6 +94,7 @@ impl RingView {
             invocation,
             commands,
             hovered: None,
+            clipped: false,
             _showing: showing,
         }
     }
@@ -170,7 +175,15 @@ impl RingView {
 }
 
 impl Render for RingView {
-    fn render(&mut self, _window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+    fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+        // The window's circular shape, applied once. Here rather than beside
+        // `open_window` because a window that has not been created natively
+        // yet has no handle to shape, and its first paint is the earliest
+        // moment it provably has one.
+        if !self.clipped {
+            self.clipped = true;
+            platform::clip_to_circle(window);
+        }
         let session_id = self.invocation.session_id;
         let root_commands = self.commands.clone();
         let center_commands = self.commands.clone();
