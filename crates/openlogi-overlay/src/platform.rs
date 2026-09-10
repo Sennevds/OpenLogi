@@ -30,102 +30,180 @@ pub fn configure_windows() {
 #[cfg(not(target_os = "macos"))]
 pub fn configure_application() {}
 
-/// Clip `window` to a circle, so nothing outside the dial can paint.
+/// Make `window` genuinely transparent where it paints nothing.
 ///
-/// The ring is round but its window is a rectangle, and GPUI's Windows backend
-/// paints that whole rectangle — as a tint, an acrylic backdrop, or just an
-/// opaque clear colour, depending on the compositor's mood and the user's
-/// transparency setting. Chasing each of those is a losing game; a window
-/// region settles it structurally. Pixels outside the ellipse are not part of
-/// the window, so there is nowhere for any of them to be drawn.
+/// GPUI's Windows renderer already clears a non-opaque window to `[0,0,0,0]`
+/// on a premultiplied DirectComposition swapchain, so per-pixel transparency is
+/// *available*. What defeats it is the DWM accent policy GPUI then applies to
+/// the same window: `Transparent` maps to accent state 2 (a whitish veil) and
+/// `Blurred` to state 4 (acrylic), and either one paints the entire window
+/// rectangle — the square around the ring. A `SetWindowRgn` region does not
+/// help, because DWM composites DirectComposition content without regard to it;
+/// that was tried, and the log said "clipped" while the square stayed.
 ///
-/// Takes the window rather than enumerating the thread's windows: an
-/// agent-invoked ring opens a fresh window per invocation while the previous
-/// one is still closing, and "every window on this thread" is then ambiguous
-/// about which one is the live ring.
+/// So this re-issues the same undocumented call GPUI uses, with the accent
+/// state set to *disabled*. The clear colour is untouched, the swapchain is
+/// untouched, and with no accent policy the unpainted pixels are simply not
+/// there. Undocumented, so it is resolved at runtime and a miss is logged, not
+/// assumed.
 #[cfg(target_os = "windows")]
-pub fn clip_to_circle(window: &gpui::Window) {
+pub fn disable_backdrop(window: &gpui::Window) {
+    use std::ffi::c_void;
+
+    use windows_sys::Win32::Foundation::HWND;
+    use windows_sys::Win32::System::LibraryLoader::{GetModuleHandleA, GetProcAddress};
+
+    /// `WCA_ACCENT_POLICY`, mirroring GPUI's own use of the same private API.
+    const WCA_ACCENT_POLICY: u32 = 0x13;
+    /// `ACCENT_DISABLED`: no veil, no acrylic, nothing painted behind the scene.
+    const ACCENT_DISABLED: u32 = 0;
+
+    #[repr(C)]
+    struct AccentPolicy {
+        accent_state: u32,
+        accent_flags: u32,
+        gradient_color: u32,
+        animation_id: u32,
+    }
+
+    #[repr(C)]
+    struct WindowCompositionAttribData {
+        attrib: u32,
+        pv_data: *mut c_void,
+        cb_data: usize,
+    }
+
+    type SetWindowCompositionAttribute =
+        unsafe extern "system" fn(HWND, *mut WindowCompositionAttribData) -> i32;
+
+    let Some(hwnd) = hwnd_of(window) else {
+        return;
+    };
+
+    #[expect(
+        unsafe_code,
+        reason = "SetWindowCompositionAttribute is an undocumented user32 export with no safe binding; GPUI reaches it the same way"
+    )]
+    // SAFETY: both strings are NUL-terminated literals; `GetModuleHandleA` on a
+    // module this process has already loaded (GPUI's renderer uses user32)
+    // returns a non-owning handle, and `GetProcAddress` on it is a pure lookup.
+    let entry = unsafe {
+        let user32 = GetModuleHandleA(c"user32.dll".as_ptr().cast());
+        if user32.is_null() {
+            None
+        } else {
+            GetProcAddress(user32, c"SetWindowCompositionAttribute".as_ptr().cast())
+        }
+    };
+    let Some(entry) = entry else {
+        tracing::warn!("SetWindowCompositionAttribute is unavailable — backdrop stays");
+        return;
+    };
+
+    let accent = AccentPolicy {
+        accent_state: ACCENT_DISABLED,
+        accent_flags: 0,
+        gradient_color: 0,
+        animation_id: 0,
+    };
+    let mut data = WindowCompositionAttribData {
+        attrib: WCA_ACCENT_POLICY,
+        pv_data: (&raw const accent).cast_mut().cast(),
+        cb_data: std::mem::size_of::<AccentPolicy>(),
+    };
+    #[expect(
+        unsafe_code,
+        reason = "see above — calling the resolved private entry point"
+    )]
+    // SAFETY: `entry` is the address user32 reported for this exact export, and
+    // its signature is the one Windows has used since Windows 10 1809 (GPUI
+    // relies on the same). `hwnd` is live, and `data` points at a struct that
+    // outlives the call.
+    let applied = unsafe {
+        let set: SetWindowCompositionAttribute = std::mem::transmute(entry);
+        set(hwnd, &raw mut data)
+    } != 0;
+    if applied {
+        tracing::debug!("ring window backdrop disabled — per-pixel transparency in effect");
+    } else {
+        tracing::warn!("SetWindowCompositionAttribute refused — backdrop stays");
+    }
+
+    remove_dwm_frame(hwnd);
+}
+
+/// The Win32 handle behind a GPUI window, or `None` (logged) when there is none.
+#[cfg(target_os = "windows")]
+fn hwnd_of(window: &gpui::Window) -> Option<windows_sys::Win32::Foundation::HWND> {
     use raw_window_handle::{HasWindowHandle, RawWindowHandle};
-    use windows_sys::Win32::Foundation::{HWND, RECT, TRUE};
-    use windows_sys::Win32::Graphics::Gdi::{CreateEllipticRgn, DeleteObject, SetWindowRgn};
-    use windows_sys::Win32::UI::WindowsAndMessaging::GetWindowRect;
+    use windows_sys::Win32::Foundation::HWND;
 
     // The trait method by full path: GPUI's inherent `Window::window_handle`
     // returns its own `AnyWindowHandle` and would shadow this one.
     let handle = match HasWindowHandle::window_handle(window) {
         Ok(handle) => handle.as_raw(),
         Err(error) => {
-            tracing::warn!(%error, "ring window exposes no native handle — staying rectangular");
-            return;
+            tracing::warn!(%error, "ring window exposes no native handle — backdrop stays");
+            return None;
         }
     };
     let RawWindowHandle::Win32(win32) = handle else {
-        tracing::warn!("ring window is not a Win32 window — staying rectangular");
-        return;
+        tracing::warn!("ring window is not a Win32 window — backdrop stays");
+        return None;
     };
-    let hwnd: HWND = win32.hwnd.get() as HWND;
+    Some(win32.hwnd.get() as HWND)
+}
 
-    let mut rect = RECT {
-        left: 0,
-        top: 0,
-        right: 0,
-        bottom: 0,
+/// Strip Windows 11's own frame from `hwnd`.
+///
+/// With the backdrop gone, what is left of the rectangle is drawn on every
+/// top-level window unless it opts out: rounded corners, a 1px border, and —
+/// outliving `BORDER_COLOR = NONE` — a 1px white non-client edge along the top.
+/// The macOS arm opts out of the equivalent with `setHasShadow(false)`; these
+/// are the documented DWM knobs.
+#[cfg(target_os = "windows")]
+fn remove_dwm_frame(hwnd: windows_sys::Win32::Foundation::HWND) {
+    use windows_sys::Win32::Graphics::Dwm::{
+        DWMNCRP_DISABLED, DWMWA_BORDER_COLOR, DWMWA_COLOR_NONE, DWMWA_NCRENDERING_POLICY,
+        DWMWA_WINDOW_CORNER_PREFERENCE, DWMWCP_DONOTROUND, DwmSetWindowAttribute,
     };
-    #[expect(
-        unsafe_code,
-        reason = "GetWindowRect/CreateEllipticRgn/SetWindowRgn are the only way to give a window a non-rectangular shape"
-    )]
-    // SAFETY: `hwnd` is the handle GPUI just reported for a live window, and
-    // `rect` is a live, writable `RECT` for the duration of the call.
-    let measured = unsafe { GetWindowRect(hwnd, &raw mut rect) } != 0;
-    let (width, height) = (rect.right - rect.left, rect.bottom - rect.top);
-    if !measured || width <= 0 || height <= 0 {
-        tracing::warn!(
-            width,
-            height,
-            "could not measure the ring window — staying rectangular"
-        );
-        return;
-    }
 
-    #[expect(
-        unsafe_code,
-        reason = "see above — GDI region APIs are the shape mechanism"
-    )]
-    // SAFETY: a pure GDI constructor over by-value bounds; null on failure,
-    // which is checked before the region is handed to the window.
-    let region = unsafe { CreateEllipticRgn(0, 0, width, height) };
-    if region.is_null() {
-        tracing::warn!("could not create the ring's elliptic region");
-        return;
-    }
-    #[expect(
-        unsafe_code,
-        reason = "see above — GDI region APIs are the shape mechanism"
-    )]
-    // SAFETY: `hwnd` is valid and `region` was just created. On success the
-    // window takes ownership and frees it; on failure it does not, so the
-    // region is still owned here and is deleted below.
-    let applied = unsafe { SetWindowRgn(hwnd, region, TRUE) } != 0;
-    if applied {
-        tracing::debug!(width, height, "ring window clipped to a circle");
-    } else {
+    /// Every attribute here is a `u32`, and DWM wants its byte size — written
+    /// as a const expression so no cast can truncate it.
+    const ATTRIBUTE_SIZE: u32 = u32::BITS / 8;
+
+    let frame: [(u32, u32, &str); 3] = [
+        (
+            DWMWA_WINDOW_CORNER_PREFERENCE as u32,
+            DWMWCP_DONOTROUND as u32,
+            "corners",
+        ),
+        (DWMWA_BORDER_COLOR as u32, DWMWA_COLOR_NONE, "border"),
+        (
+            DWMWA_NCRENDERING_POLICY as u32,
+            DWMNCRP_DISABLED as u32,
+            "non-client edge",
+        ),
+    ];
+    for (attribute, value, what) in frame {
         #[expect(
             unsafe_code,
-            reason = "see above — GDI region APIs are the shape mechanism"
+            reason = "DwmSetWindowAttribute has no safe binding; every value here is a plain u32 attribute"
         )]
-        // SAFETY: `SetWindowRgn` failed, so the window never took the region
-        // and this still owns it.
-        unsafe {
-            DeleteObject(region);
+        // SAFETY: `hwnd` is live; the call receives a pointer to a `u32` that
+        // outlives it, with its exact size, as the attribute's contract requires.
+        let ok = unsafe {
+            DwmSetWindowAttribute(hwnd, attribute, (&raw const value).cast(), ATTRIBUTE_SIZE)
+        } == 0;
+        if !ok {
+            tracing::warn!(what, "could not remove part of the ring window's DWM frame");
         }
-        tracing::warn!("SetWindowRgn failed — the ring window stays rectangular");
     }
 }
 
-/// Only Windows paints outside a transparent window's content.
+/// Only Windows paints a backdrop behind a transparent window's content.
 #[cfg(not(target_os = "windows"))]
-pub fn clip_to_circle(window: &gpui::Window) {
+pub fn disable_backdrop(window: &gpui::Window) {
     let _ = window;
 }
 

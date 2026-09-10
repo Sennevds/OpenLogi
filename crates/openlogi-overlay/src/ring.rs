@@ -26,34 +26,23 @@ pub(crate) const SLOT_SIZE: f32 = 54.0;
 pub(crate) const RADIUS: f32 = 122.0;
 
 /// The ring's own neutral scale. It floats over whatever is on the desktop, so
-/// unlike the settings app it cannot take its surfaces from the OS appearance —
-/// it commits to a dark panel and rides its own contrast. Only the accent is
-/// shared (`openlogi_ui::color`); these greys are local by nature.
+/// unlike the settings app it cannot take its surfaces from the OS appearance.
+/// Only the accent is shared (`openlogi_ui::color`); these are local by nature.
 ///
-/// The panel is deliberately translucent: the ring appears over whatever the user was looking at, and an
-/// opaque black plate reads as a modal dialog rather than a transient overlay.
-/// The lightness is lifted off black at the same time — a near-black fill at
-/// partial alpha just muddies what is behind it, where a lighter grey reads as
-/// glass. Every glyph and chip above it keeps its own contrast, so the band can
-/// afford to be quiet.
-const PANEL: Hsla = neutral(0.06, 0.50);
-/// Hairline around the rim, so the panel keeps an edge on a busy desktop where
-/// alpha alone would let it dissolve.
-const PANEL_EDGE: Hsla = neutral(0.92, 0.20);
-/// A resting slot has **no** chip: its glyph sits directly on the band. Eight
-/// filled bubbles read as blobs over a translucent panel — they were the whole
-/// reason the ring looked heavy — and they are also redundant, because the band
-/// already supplies the glyphs' contrast. Only the hovered slot gets a fill.
-const SLOT_RESTING: Hsla = neutral(0.0, 0.0);
-/// The hovered slot's disc, in accent — see [`SELECTED_FILL_L`].
-const SLOT_HOVER_ALPHA: f32 = 0.85;
-/// The centre cancel target, kept quiet: it is the ring's escape hatch, not one
-/// of its actions. Quiet, but not invisible — at 14% it disappeared into the
-/// panel entirely, and an escape hatch nobody can find is not one.
-const CANCEL_RESTING: Hsla = neutral(0.98, 0.24);
+/// There is no panel. The ring is eight solid chips and a centre target on a
+/// fully transparent window — the shape the original Actions Ring has — and
+/// every earlier attempt at a translucent disc behind them was fighting the
+/// window's backdrop, not designing. Solid chips need no backdrop to read on,
+/// because black on anything reads.
+const SLOT_RESTING: Hsla = neutral(0.08, 1.0);
 const GLYPH: Hsla = neutral(0.98, 1.0);
-const LABEL: Hsla = neutral(0.94, 1.0);
-const CANCEL_GLYPH: Hsla = neutral(0.82, 1.0);
+/// The hovered slot's label, a light chip with dark text beneath the ring.
+const LABEL_CHIP: Hsla = neutral(1.0, 0.96);
+const LABEL: Hsla = neutral(0.12, 1.0);
+/// The centre cancel target: light and small, an escape hatch rather than an
+/// action, exactly as the original draws its `×`.
+const CANCEL_RESTING: Hsla = neutral(0.93, 1.0);
+const CANCEL_GLYPH: Hsla = neutral(0.30, 1.0);
 
 const fn neutral(lightness: f32, alpha: f32) -> Hsla {
     Hsla {
@@ -74,10 +63,10 @@ pub(crate) struct RingView {
     invocation: ActionRingInvocation,
     commands: mpsc::UnboundedSender<OverlayCommand>,
     hovered: Option<ActionRingSlot>,
-    /// Whether this window has been given its circular region yet. The shape
-    /// is native and one-shot, and the first paint is the earliest point the
-    /// window is guaranteed to exist natively.
-    clipped: bool,
+    /// Whether this window's backdrop has been switched off yet. It is a
+    /// native, one-shot call that needs the window to exist, and the first
+    /// paint is the earliest point that is guaranteed.
+    backdrop_cleared: bool,
     /// Publishes click-away identity for exactly this view's lifetime.
     _showing: ShowingRing,
 }
@@ -94,7 +83,7 @@ impl RingView {
             invocation,
             commands,
             hovered: None,
-            clipped: false,
+            backdrop_cleared: false,
             _showing: showing,
         }
     }
@@ -135,19 +124,13 @@ impl RingView {
                 .justify_center()
                 .rounded_full()
                 .bg(if selected {
-                    let mut fill = color::accent_at_lightness(SELECTED_FILL_L);
-                    fill.a = SLOT_HOVER_ALPHA;
-                    fill
+                    color::accent_at_lightness(SELECTED_FILL_L)
                 } else {
                     SLOT_RESTING
                 })
-                // Border and shadow ride with the fill: on a chip-less resting
-                // slot a shadow has nothing to cast from and renders as a
-                // smudge on the band.
                 .when(selected, |slot| {
                     slot.border_2()
                         .border_color(color::accent_at_lightness(SELECTED_BORDER_L))
-                        .shadow_md()
                 })
                 .text_color(GLYPH)
                 .cursor_pointer()
@@ -176,13 +159,13 @@ impl RingView {
 
 impl Render for RingView {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
-        // The window's circular shape, applied once. Here rather than beside
+        // Switch the window's DWM backdrop off, once. Here rather than beside
         // `open_window` because a window that has not been created natively
-        // yet has no handle to shape, and its first paint is the earliest
-        // moment it provably has one.
-        if !self.clipped {
-            self.clipped = true;
-            platform::clip_to_circle(window);
+        // yet has no handle, and its first paint is the earliest moment it
+        // provably has one.
+        if !self.backdrop_cleared {
+            self.backdrop_cleared = true;
+            platform::disable_backdrop(window);
         }
         let session_id = self.invocation.session_id;
         let root_commands = self.commands.clone();
@@ -210,25 +193,6 @@ impl Render for RingView {
             .id("ring-root")
             .relative()
             .size_full()
-            .child(
-                // One translucent disc, filling the window edge to edge: the
-                // window is clipped to the same circle (see
-                // `platform::configure_windows`), so an inset would only leave
-                // a rim of bare backdrop around the dial. No drop shadow for
-                // the same reason — it would fall outside the clip and be cut
-                // away, and inside it would just darken the rim.
-                //
-                // Tried and rejected: a band drawn as a thick border, leaving
-                // the centre a hole. Without a backdrop blur the hole just
-                // frames whatever is behind it, which reads as a washer.
-                div()
-                    .absolute()
-                    .inset_0()
-                    .rounded_full()
-                    .bg(PANEL)
-                    .border_1()
-                    .border_color(PANEL_EDGE),
-            )
             .children(slots)
             .child(
                 div()
@@ -244,7 +208,13 @@ impl Render for RingView {
                     .bg(CANCEL_RESTING)
                     .text_color(CANCEL_GLYPH)
                     .cursor_pointer()
-                    .child(svg().path(RING_CANCEL_ICON).size(px(20.0)).flex_none())
+                    .child(
+                        svg()
+                            .path(RING_CANCEL_ICON)
+                            .size(px(20.0))
+                            .flex_none()
+                            .text_color(CANCEL_GLYPH),
+                    )
                     .on_click(move |_, window, cx| {
                         cx.stop_propagation();
                         let _ = center_commands.send(OverlayCommand::Cancel { session_id });
@@ -258,10 +228,18 @@ impl Render for RingView {
                         .left(px(WINDOW_SIZE / 2.0 - 80.0))
                         .top(px(WINDOW_SIZE / 2.0 + 34.0))
                         .w(px(160.0))
-                        .text_center()
-                        .text_sm()
-                        .text_color(LABEL)
-                        .child(label),
+                        .flex()
+                        .justify_center()
+                        .child(
+                            div()
+                                .px_3()
+                                .py_1()
+                                .rounded_md()
+                                .bg(LABEL_CHIP)
+                                .text_sm()
+                                .text_color(LABEL)
+                                .child(label),
+                        ),
                 )
             })
             .on_click(move |_, window, _| {
@@ -333,14 +311,11 @@ pub(crate) fn ring_window_options(cx: &mut gpui::App) -> WindowOptions {
         is_resizable: false,
         is_minimizable: false,
         display_id,
-        // `Blurred`, not `Transparent`. On Windows GPUI maps `Transparent` to
-        // accent state 2 with a *null* gradient colour, which paints an
-        // undefined — in practice whitish — veil over the whole window rect:
-        // the "square around the circle". `Blurred` is accent state 4,
-        // acrylic blur-behind with a `(0,0,0,0)` gradient, so nothing tints the
-        // rect and the backdrop is genuinely see-through. On macOS it inserts
-        // an `NSVisualEffectView`, which is the same intent natively.
-        window_background: WindowBackgroundAppearance::Blurred,
+        // Any non-`Opaque` appearance makes GPUI clear the window to
+        // `[0,0,0,0]`; the DWM accent it also applies is switched off on first
+        // paint (see `platform::disable_backdrop`), which is what makes that
+        // clear actually see-through rather than veiled.
+        window_background: WindowBackgroundAppearance::Transparent,
         app_id: Some("openlogi-action-ring".to_string()),
         ..WindowOptions::default()
     }

@@ -51,11 +51,11 @@ workspace = true
 # The HWND behind GPUI's `Window`, to give it a circular region. Pinned to the
 # version gpui itself links, or the handle types would not be the same types.
 raw-window-handle = "0.6"
-# SetWindowRgn/CreateEllipticRgn: the ring is round but its window is a
-# rectangle, and GPUI has no API for a non-rectangular window.
+# SetWindowCompositionAttribute (resolved at runtime): GPUI paints a DWM
+# accent backdrop over a transparent window's whole rectangle, and the ring
+# needs it off. GPUI exposes no knob for that.
 windows-sys = { workspace = true, features = [
     "Win32_Foundation",
-    "Win32_Graphics_Gdi",
-    "Win32_System_Threading",
-    "Win32_UI_WindowsAndMessaging",
+    "Win32_Graphics_Dwm",
+    "Win32_System_LibraryLoader",
 ] }
